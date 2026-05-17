@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>野人獻曝咖啡店面庫存管理系統</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#6B3D1E">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="野人咖啡">
+<link rel="apple-touch-icon" href="icon-192.png">
+
+<!-- Firebase SDK -->
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+
+<!-- React -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{background:#F4EFE6;font-family:'Noto Sans TC','DM Sans',sans-serif;overscroll-behavior:none}
+input,select,button,textarea{font-family:inherit}
+input:focus,select:focus,textarea:focus{outline:2px solid #C8864A;outline-offset:1px}
+::-webkit-scrollbar{display:none}
+select option{background:#fff;color:#2C1810}
+</style>
+</head>
+<body>
+<script>
+// 強制清除所有舊快取
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then(regs => {
+    regs.forEach(r => r.unregister());
+  });
+  caches.keys().then(keys => keys.forEach(k => caches.delete(k)));
+}
+</script>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ════ CONSTANTS ════ */
+const ACCT_CATS = [
+  {id:"beans_in", label:"咖啡豆進貨",   icon:"🫘", color:"#7B4F2E", bg:"#FDF0E6"},
+  {id:"equip_in", label:"器材進貨",     icon:"⚙️", color:"#3A6EA5", bg:"#E8F0FA"},
+  {id:"utilities",label:"水電支出",     icon:"💡", color:"#B07C10", bg:"#FDF5DC"},
+  {id:"rent",     label:"房租支出",     icon:"🏠", color:"#6B52A8", bg:"#F0ECFA"},
+  {id:"supplies", label:"耗材支出",     icon:"📦", color:"#3A7D5A", bg:"#E7F5ED"},
+  {id:"equip_buy",label:"購買設備支出", icon:"🔧", color:"#3A7A9E", bg:"#E5F2FA"},
+  {id:"telecom",  label:"電話網路費",   icon:"📱", color:"#2E8C7A", bg:"#E5F5F1"},
+  {id:"marketing",label:"額外行銷費用", icon:"📢", color:"#B04848", bg:"#FAE8E8"},
+];
+const BEAN_SIZES = ["半磅","一磅","五磅"];
+const CURRENCIES = {TWD:"NT$",USD:"$",JPY:"¥"};
+const fmt = (n,cur="TWD") => `${CURRENCIES[cur]||cur}${Number(n||0).toLocaleString("zh-TW",{maximumFractionDigits:0})}`;
+const today = () => new Date().toISOString().slice(0,10);
+const thisMonth = () => new Date().toISOString().slice(0,7);
+const T = {
+  bg:"#F4EFE6", card:"rgba(255,255,255,0.97)", cardBorder:"#E8DFCF",
+  primary:"#6B3D1E", primaryLight:"#F5EBE0",
+  accent:"#4A7C59", text:"#2C1810", textMid:"#7A6050", textLight:"#B0A090",
+  border:"#E2D8CA", shadow:"0 2px 12px rgba(100,60,20,0.10)",
+};
+
+/* ════ LOCAL STORAGE (config only) ════ */
+const LS = {
+  get:(k,d)=>{try{const v=localStorage.getItem(k);return v!==null?JSON.parse(v):d;}catch{return d;}},
+  set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}}
+};
+
+/* ════ FIREBASE CONFIG (已設定) ════ */
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBlxt951PMVXGxDm6AHe2pxj-yAZv4ejJA",
+  authDomain: "ifreetimecafe-5dee3.firebaseapp.com",
+  databaseURL: "https://ifreetimecafe-5dee3-default-rtdb.firebaseio.com",
+  projectId: "ifreetimecafe-5dee3",
+  storageBucket: "ifreetimecafe-5dee3.firebasestorage.app",
+  messagingSenderId: "193108431068",
+  appId: "1:193108431068:web:fb2ab5a4ce79a01a40e419",
+  measurementId: "G-7TF6VM78HD"
+};
+
+/* ════ FIREBASE DB ════ */
+let db = null;
+let fbApp = null;
+
+function initFirebase(config) {
+  try {
+    if (fbApp) { try { fbApp.delete(); } catch {} }
+    fbApp = firebase.initializeApp(config, "coffee-app-" + Date.now());
+    db = fbApp.firestore();
+    db.settings({ experimentalForceLongPolling: true });
+    return true;
+  } catch(e) {
+    console.error("Firebase init error:", e);
+    return false;
+  }
+}
+
+/* ════ AI ════ */
+async function aiRecognize(apiKey, imgB64, type) {
+  if (!apiKey) throw new Error("請先在「設定」填入 Anthropic API Key");
+  const PROMPTS = {
+    beans_batch:`你是咖啡豆進貨辨識助手，擅長辨識繁體中文、簡體中文、英文進貨單。這張圖片可能是進貨發票或出貨單，上面有多個品項（最多10個）。請仔細辨識所有品項，只回傳JSON陣列，不加任何說明：
+[{"name":"品名","country":"產地","productionDate":"YYYY-MM-DD","size":"半磅或一磅或五磅","quantity":數量數字,"unitPrice":單價數字,"note":"備註"}]`,
+    drip:`辨識濾掛包裝或進貨單，只回傳JSON：{"name":"品名","purchaseDate":"YYYY-MM-DD","quantity":數量,"unitPrice":單價,"note":"備註"}`,
+    enzyme:`辨識酵素商品標籤或進貨單，只回傳JSON：{"name":"品名","quantity":數量,"unitPrice":單價,"purchaseDate":"YYYY-MM-DD","note":"備註"}`,
+    accounting:`辨識收據發票（繁體中文、統一發票均可），只回傳JSON：{"merchant":"商家","amount":金額數字,"currency":"TWD/USD/JPY","date":"YYYY-MM-DD","category":"beans_in/equip_in/utilities/rent/supplies/equip_buy/telecom/marketing之一","note":"備註"}`,
+    revenue:`辨識營業收入收據或日結單，只回傳JSON：{"date":"YYYY-MM-DD","description":"收入說明","amount":金額數字,"note":"備註"}`
+  };
+  const res = await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2000,messages:[{role:"user",content:[
+      {type:"image",source:{type:"base64",media_type:"image/jpeg",data:imgB64}},
+      {type:"text",text:PROMPTS[type]}
+    ]}]})
+  });
+  if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(`API錯誤 ${res.status}: ${e?.error?.message||"請稍後再試"}`);}
+  const data=await res.json();
+  const raw=data.content?.map(i=>i.text||"").join("")||"";
+  for(const s of [raw.trim(),raw.replace(/```json\s*/gi,"").replace(/```/g,"").trim(),raw.match(/[\[{][\s\S]*[\]}]/)?.[0]||""]){
+    try{if(s)return JSON.parse(s);}catch{}
+  }
+  throw new Error(`格式異常：${raw.slice(0,150)}`);
+}
+
+/* ════ UI ATOMS ════ */
+const Lbl=({c})=><span style={{fontSize:11,fontWeight:700,color:T.textLight,letterSpacing:"0.07em",textTransform:"uppercase"}}>{c}</span>;
+const Field=({label,value,onChange,type="text",placeholder,mono,style})=>(
+  <label style={{display:"flex",flexDirection:"column",gap:4,...style}}>
+    {label&&<Lbl c={label}/>}
+    <input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+      style={{background:"#FAF7F2",border:`1.5px solid ${T.border}`,borderRadius:10,padding:"11px 12px",color:T.text,fontSize:14,outline:"none",fontFamily:mono?"'DM Mono',monospace":"inherit",width:"100%",boxSizing:"border-box"}}/>
+  </label>
+);
+const Sel=({label,value,onChange,options})=>(
+  <label style={{display:"flex",flexDirection:"column",gap:4}}>
+    {label&&<Lbl c={label}/>}
+    <select value={value} onChange={e=>onChange(e.target.value)}
+      style={{background:"#FAF7F2",border:`1.5px solid ${T.border}`,borderRadius:10,padding:"11px 12px",color:T.text,fontSize:14,outline:"none",width:"100%"}}>
+      {options.map(o=><option key={o.value??o} value={o.value??o}>{o.label??o}</option>)}
+    </select>
+  </label>
+);
+const PBtn=({children,onClick,disabled,full,sm,green})=>(
+  <button onClick={onClick} disabled={disabled} style={{background:disabled?"#C5B8A8":green?"linear-gradient(135deg,#3A7D5A,#2E6348)":`linear-gradient(135deg,${T.primary},#9B5A30)`,color:"#FFF8F0",border:"none",borderRadius:10,padding:sm?"8px 14px":"11px 18px",fontSize:sm?12:14,fontWeight:700,cursor:disabled?"not-allowed":"pointer",width:full?"100%":"auto",boxShadow:disabled?"none":"0 3px 10px rgba(107,61,30,0.2)"}}>
+  {children}
+  </button>
+);
+const GBtn=({children,onClick,color,sm})=>(
+  <button onClick={onClick} style={{background:"transparent",color:color||T.textMid,border:`1.5px solid ${color||T.border}`,borderRadius:9,padding:sm?"6px 11px":"10px 15px",fontSize:sm?12:13,fontWeight:600,cursor:"pointer"}}>{children}</button>
+);
+const Card=({children,style})=>(
+  <div style={{background:T.card,border:`1.5px solid ${T.cardBorder}`,borderRadius:16,padding:"14px 15px",boxShadow:T.shadow,...style}}>{children}</div>
+);
+const Badge=({label,color,bg})=>(
+  <span style={{fontSize:11,padding:"2px 8px",borderRadius:20,fontWeight:700,background:bg||"#F0EBE3",color:color||T.textMid,border:`1px solid ${color}33`}}>{label}</span>
+);
+
+/* ════ CONFIRM DIALOG ════ */
+function ConfirmDialog({config,onClose}){
+  const [step,setStep]=useState(0);
+  useEffect(()=>{if(!config)setStep(0);},[config]);
+  if(!config)return null;
+  const isTriple=config.triple;
+  const colors=["#6B3D1E","#C05020","#8B0000"];
+  const labels=["確認刪除","⚠️ 再次確認","🗑️ 最終確認（無法復原）"];
+  const handleOk=()=>{if(isTriple&&step<2){setStep(s=>s+1);return;}config.onConfirm();onClose();setStep(0);};
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <Card style={{maxWidth:340,width:"100%",borderColor:isTriple?`${colors[step]}44`:T.primary+"44"}}>
+        <div style={{fontSize:22,textAlign:"center",marginBottom:10}}>{isTriple?"🗑️":"✅"}</div>
+        <div style={{fontSize:15,fontWeight:700,textAlign:"center",marginBottom:8}}>{config.title}</div>
+        <div style={{fontSize:13,color:T.textMid,textAlign:"center",marginBottom:16,lineHeight:1.6,whiteSpace:"pre-line"}}>{config.message}</div>
+        {isTriple&&step>0&&(
+          <div style={{fontSize:12,color:colors[step],fontWeight:700,textAlign:"center",padding:"7px 10px",background:colors[step]+"11",borderRadius:8,border:`1px solid ${colors[step]}33`,marginBottom:12}}>
+            第{step+1}/3次確認{step===2?" — 此操作無法復原！":""}
+          </div>
+        )}
+        <div style={{display:"flex",gap:10}}>
+          <button onClick={()=>{onClose();setStep(0);}} style={{flex:1,padding:"10px 0",borderRadius:9,border:`1.5px solid ${T.border}`,background:"transparent",color:T.textMid,fontWeight:600,fontSize:13,cursor:"pointer"}}>取消</button>
+          <button onClick={handleOk} style={{flex:1,padding:"10px 0",borderRadius:9,border:"none",background:isTriple?colors[step]:T.primary,color:"#FFF",fontWeight:700,fontSize:13,cursor:"pointer"}}>
+            {isTriple?labels[step]:"確認"}
+          </button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/* ════ IMAGE UPLOAD ════ */
+function ImageUpload({onRecognize,loading,aiStatus,setAiStatus,hasKey}){
+  const fileRef=useRef();
+  const [preview,setPreview]=useState(null);
+  const handleFile=e=>{const file=e.target.files[0];if(!file)return;const r=new FileReader();r.onload=ev=>{setPreview(ev.target.result);setAiStatus?.(null);};r.readAsDataURL(file);};
+  return(
+    <div>
+      {preview?(
+        <div style={{borderRadius:12,overflow:"hidden",border:`1.5px solid ${T.cardBorder}`}}>
+          <img src={preview} alt="" style={{width:"100%",maxHeight:200,objectFit:"contain",background:"#F9F5EE",display:"block"}}/>
+          <div style={{display:"flex",gap:8,padding:10,background:"#FFF"}}>
+            {hasKey
+              ?<PBtn onClick={()=>onRecognize(preview.split(",")[1])} disabled={loading} sm>{loading?"⏳ AI辨識中…":"🤖 AI自動辨識（支援中文）"}</PBtn>
+              :<div style={{fontSize:12,color:"#B04848",padding:"8px 0"}}>⚠️ 請先在「設定」填入 API Key</div>
+            }
+            <GBtn onClick={()=>{setPreview(null);fileRef.current.value="";}} sm>重選</GBtn>
+          </div>
+        </div>
+      ):(
+        <div onClick={()=>fileRef.current?.click()} style={{border:`2px dashed ${T.primary}55`,borderRadius:12,padding:"18px 0",textAlign:"center",cursor:"pointer",background:T.primaryLight}}>
+          <div style={{fontSize:26,marginBottom:4}}>📷</div>
+          <div style={{fontSize:13,fontWeight:700,color:T.primary,marginBottom:2}}>拍照或上傳圖片</div>
+          <div style={{fontSize:11,color:T.textLight}}>支援中文、英文收據、標籤、發票</div>
+        </div>
+      )}
+      <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{display:"none"}}/>
+      {aiStatus&&(
+        <div style={{marginTop:8,padding:"9px 12px",borderRadius:9,background:aiStatus.type==="error"?"#FFF0F0":"#F0FFF4",border:`1.5px solid ${aiStatus.type==="error"?"#FFCDD2":"#C8E6C9"}`}}>
+          <div style={{fontSize:12,fontWeight:700,color:aiStatus.type==="error"?"#C62828":"#2E7D32"}}>{aiStatus.type==="error"?"❌ 辨識失敗":"✅ 辨識完成！請確認後儲存"}</div>
+          {aiStatus.type==="error"&&<div style={{fontSize:11,color:"#B71C1C",marginTop:3,wordBreak:"break-all"}}>{aiStatus.message}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ════ LOGIN SCREEN ════ */
+function LoginScreen({onLogin}){
+  const [account,setAccount]=useState(()=>LS.get("wc5_saved_account",""));
+  const [password,setPassword]=useState(()=>LS.get("wc5_saved_pw",""));
+  const [err,setErr]=useState("");
+  const [showPw,setShowPw]=useState(false);
+
+  const handle=()=>{
+    if(account==="kenhu"&&password==="12341234"){
+      LS.set("wc5_saved_account",account);
+      LS.set("wc5_saved_pw",password);
+      onLogin();
+    } else {
+      setErr("帳號或密碼錯誤，請重試");
+      setTimeout(()=>setErr(""),2500);
+    }
+  };
+
+  return(
+    <div style={{minHeight:"100vh",background:"linear-gradient(160deg,#2C1508 0%,#4A2010 40%,#3A1A08 100%)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"30px 24px",fontFamily:"'Noto Sans TC',sans-serif"}}>
+
+      {/* Logo area */}
+      <div style={{textAlign:"center",marginBottom:48}}>
+        <div style={{fontSize:52,marginBottom:16}}>☕</div>
+        <div style={{fontFamily:"'Noto Serif TC',serif",fontSize:32,color:"#F5E6C8",fontWeight:700,letterSpacing:"0.06em",marginBottom:10,textShadow:"0 2px 12px rgba(200,134,74,0.4)"}}>
+          野人獻曝咖啡
+        </div>
+        <div style={{fontSize:14,color:"#C8864A",letterSpacing:"0.2em",fontWeight:500}}>
+          利益眾生　聖凡兼修
+        </div>
+      </div>
+
+      {/* Login card */}
+      <div style={{width:"100%",maxWidth:340,background:"rgba(255,255,255,0.07)",border:"1px solid rgba(200,134,74,0.25)",borderRadius:20,padding:"28px 24px",backdropFilter:"blur(10px)"}}>
+        <div style={{fontSize:13,color:"#C8864A",fontWeight:700,letterSpacing:"0.1em",textAlign:"center",marginBottom:24}}>店面管理系統登入</div>
+
+        {/* Account */}
+        <label style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14}}>
+          <span style={{fontSize:11,color:"#8C7355",letterSpacing:"0.08em",textTransform:"uppercase",fontWeight:700}}>帳號 Account</span>
+          <input value={account} onChange={e=>setAccount(e.target.value)} placeholder="輸入帳號"
+            style={{background:"rgba(255,255,255,0.08)",border:"1.5px solid rgba(200,134,74,0.3)",borderRadius:11,padding:"13px 14px",color:"#F5E6C8",fontSize:15,outline:"none",letterSpacing:"0.05em"}}/>
+        </label>
+
+        {/* Password */}
+        <label style={{display:"flex",flexDirection:"column",gap:6,marginBottom:22}}>
+          <span style={{fontSize:11,color:"#8C7355",letterSpacing:"0.08em",textTransform:"uppercase",fontWeight:700}}>密碼 Password</span>
+          <div style={{position:"relative"}}>
+            <input type={showPw?"text":"password"} value={password} onChange={e=>setPassword(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&handle()}
+              placeholder="輸入密碼"
+              style={{background:"rgba(255,255,255,0.08)",border:"1.5px solid rgba(200,134,74,0.3)",borderRadius:11,padding:"13px 44px 13px 14px",color:"#F5E6C8",fontSize:15,outline:"none",width:"100%",boxSizing:"border-box",letterSpacing:"0.1em"}}/>
+            <button onClick={()=>setShowPw(s=>!s)} style={{position:"absolute",right:12,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",fontSize:16,color:"#8C7355"}}>
+              {showPw?"🙈":"👁️"}
+            </button>
+          </div>
+        </label>
+
+        {/* Error */}
+        {err&&<div style={{fontSize:12,color:"#FCA5A5",textAlign:"center",marginBottom:14,padding:"8px 12px",background:"rgba(180,60,60,0.15)",borderRadius:8}}>❌ {err}</div>}
+
+        {/* Login button */}
+        <button onClick={handle} style={{width:"100%",padding:"14px 0",borderRadius:12,border:"none",background:"linear-gradient(135deg,#C8864A,#A0622E)",color:"#FFF8F0",fontWeight:700,fontSize:16,cursor:"pointer",letterSpacing:"0.05em",boxShadow:"0 4px 20px rgba(200,134,74,0.35)"}}>
+          確認登入
+        </button>
+
+        <div style={{fontSize:11,color:"#5A4535",textAlign:"center",marginTop:16}}>帳號密碼已自動記憶，每次點確認即可進入</div>
+      </div>
+
+      <div style={{fontSize:10,color:"#3A2515",marginTop:32,letterSpacing:"0.08em"}}>野人獻曝咖啡 店面庫存管理系統 v5.2</div>
+    </div>
+  );
+}
+
+/* ════ FIREBASE SETUP SCREEN ════ */
+function FirebaseSetup({onSave}){
+  const [raw,setRaw]=useState("");
+  const [err,setErr]=useState("");
+  const handle=()=>{
+    try{
+      let clean=raw.trim();
+      // 取出 { ... } 之間的內容
+      const m=clean.match(/\{[\s\S]*\}/);
+      if(!m){setErr("找不到設定碼，請確認有包含 { } 的完整內容");return;}
+      clean=m[0];
+      // 把 JS 物件格式轉成 JSON（處理 key 沒有引號、尾端逗號、註解）
+      const jsonStr=clean
+        .replace(/\/\/[^\n]*/g,"")
+        .replace(/\/\*[\s\S]*?\*\//g,"")
+        .replace(/([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)(\s*:)/g,'$1"$2"$3')
+        .replace(/,(\s*[}\]])/g,"$1");
+      const cfg=JSON.parse(jsonStr);
+      if(!cfg.apiKey||!cfg.projectId){setErr("格式不正確，請確認包含 apiKey 和 projectId");return;}
+      onSave(cfg);
+    }catch(e){setErr("解析失敗，請重新複製貼上完整的 firebaseConfig 內容。錯誤："+e.message);}
+  };
+  return(
+    <div style={{minHeight:"100vh",background:"linear-gradient(160deg,#F0E8DA,#F4EFE6)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:20,fontFamily:"'Noto Sans TC',sans-serif"}}>
+      <div style={{fontSize:40,marginBottom:12}}>☕</div>
+      <div style={{fontFamily:"'Noto Serif TC',serif",fontSize:18,color:T.primary,fontWeight:700,marginBottom:4}}>野人獻曝咖啡</div>
+      <div style={{fontSize:12,color:T.textLight,marginBottom:28,letterSpacing:"0.08em"}}>店面庫存管理系統 v5</div>
+
+      <Card style={{maxWidth:440,width:"100%"}}>
+        <div style={{fontSize:14,fontWeight:700,color:T.primary,marginBottom:8}}>🔥 設定 Firebase 雲端同步</div>
+        <div style={{fontSize:12,color:T.textMid,marginBottom:16,lineHeight:1.8}}>
+          請前往 <a href="https://console.firebase.google.com" target="_blank" style={{color:T.primary,fontWeight:700}}>console.firebase.google.com</a> 建立專案，取得 Firebase 設定碼後貼在下方。<br/>
+          <span style={{color:"#3A7D5A",fontWeight:700}}>詳細步驟請看「設定教學.html」</span>
+        </div>
+        <label style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14}}>
+          <Lbl c="貼上 Firebase 設定碼（firebaseConfig）"/>
+          <textarea value={raw} onChange={e=>setRaw(e.target.value)} rows={7} placeholder={`const firebaseConfig = {\n  apiKey: "AIza...",\n  authDomain: "your-app.firebaseapp.com",\n  projectId: "your-app",\n  ...\n};`}
+            style={{background:"#FAF7F2",border:`1.5px solid ${T.border}`,borderRadius:10,padding:"10px 12px",color:T.text,fontSize:12,outline:"none",fontFamily:"'DM Mono',monospace",resize:"vertical",lineHeight:1.6}}/>
+        </label>
+        {err&&<div style={{fontSize:12,color:"#C62828",marginBottom:12,padding:"8px 10px",background:"#FFF0F0",borderRadius:8}}>{err}</div>}
+        <PBtn onClick={handle} full>🔗 連線 Firebase</PBtn>
+      </Card>
+    </div>
+  );
+}
+
+/* ════ MAIN APP ════ */
+function App(){
+  const [isLoggedIn,setIsLoggedIn]=useState(false);
+  const [fbReady,setFbReady]=useState(false);
+  const [fbError,setFbError]=useState("");
+  const [tab,setTab]=useState("home");
+  const [beans,setBeans]=useState([]);
+  const [drip,setDrip]=useState([]);
+  const [enzyme,setEnzyme]=useState([]);
+  const [acct,setAcct]=useState([]);
+  const [revenue,setRevenue]=useState([]);
+  const [apiKey,setApiKey]=useState(()=>LS.get("wc5_apikey",""));
+  const [toast,setToast]=useState(null);
+  const [confirm,setConfirm]=useState(null);
+  const [syncing,setSyncing]=useState(false);
+
+  /* Init Firebase with hardcoded config */
+  useEffect(()=>{
+    const ok=initFirebase(FIREBASE_CONFIG);
+    if(!ok){setFbError("Firebase 連線失敗，請確認網路連線");setFbReady(false);return;}
+    setFbReady(true);setFbError("");
+  },[]);
+
+  /* Real-time listeners */
+  useEffect(()=>{
+    if(!fbReady||!db)return;
+    const unsubs=[];
+    const listen=(col,setter)=>{
+      const unsub=db.collection(col).onSnapshot(snap=>{
+        const data=snap.docs.map(d=>({...d.data(),id:d.id}));
+        setter(data);setSyncing(false);
+      },err=>{console.error(col,err);setSyncing(false);});
+      unsubs.push(unsub);
+    };
+    setSyncing(true);
+    listen("beans",setBeans);
+    listen("drip",setDrip);
+    listen("enzyme",setEnzyme);
+    listen("acct",setAcct);
+    listen("revenue",setRevenue);
+    return()=>unsubs.forEach(u=>u());
+  },[fbReady]);
+
+  /* DB operations */
+  const dbAdd=async(col,item)=>{
+    const id=String(item.id||Date.now());
+    await db.collection(col).doc(id).set({...item,id});
+  };
+  const dbDel=async(col,id)=>{
+    await db.collection(col).doc(String(id)).delete();
+  };
+  const dbSet=async(col,items)=>{
+    // bulk replace: delete all then add (for import)
+    const batch=db.batch();
+    const snap=await db.collection(col).get();
+    snap.docs.forEach(d=>batch.delete(d.ref));
+    items.forEach(item=>batch.set(db.collection(col).doc(String(item.id)),{...item,id:String(item.id)}));
+    await batch.commit();
+  };
+
+  const showToast=(msg,type="ok")=>{setToast({msg,type});setTimeout(()=>setToast(null),3500);};
+  const showConfirm=cfg=>setConfirm(cfg);
+  const closeConfirm=()=>setConfirm(null);
+
+  const saveApiKey=k=>{setApiKey(k);LS.set("wc5_apikey",k);};
+
+  if(!isLoggedIn){
+    return <LoginScreen onLogin={()=>setIsLoggedIn(true)}/>;
+  }
+
+  if(!fbReady){
+    return(
+      <div style={{minHeight:"100vh",background:"linear-gradient(160deg,#F0E8DA,#F4EFE6)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"'Noto Sans TC',sans-serif",padding:20}}>
+        <div style={{fontSize:40,marginBottom:12}}>☕</div>
+        <div style={{fontSize:14,color:T.primary,fontWeight:700,marginBottom:8}}>連線中...</div>
+        {fbError&&<div style={{fontSize:13,color:"#B04848",textAlign:"center",maxWidth:300}}>{fbError}</div>}
+      </div>
+    );
+  }
+
+  const monthRevenue=revenue.filter(r=>r.date?.slice(0,7)===thisMonth()).reduce((s,r)=>s+(Number(r.amount)||0),0);
+  const monthAcct=acct.filter(e=>e.date?.slice(0,7)===thisMonth()).reduce((s,e)=>s+(Number(e.amount)||0),0);
+
+  const TABS=[
+    {id:"home",icon:"🏠",label:"首頁"},
+    {id:"inventory",icon:"📦",label:"庫存"},
+    {id:"accounting",icon:"💰",label:"帳務"},
+    {id:"revenue",icon:"📈",label:"營收"},
+    {id:"settings",icon:"⚙️",label:"設定"},
+  ];
+
+  return(
+    <div style={{minHeight:"100vh",background:"linear-gradient(160deg,#F0E8DA 0%,#F4EFE6 60%,#EDE5D8 100%)",fontFamily:"'Noto Sans TC','DM Sans',sans-serif",color:T.text,paddingBottom:90}}>
+      {/* Header */}
+      <div style={{position:"sticky",top:0,zIndex:100,background:"rgba(107,61,30,0.97)",backdropFilter:"blur(12px)",padding:"13px 18px 11px",boxShadow:"0 2px 20px rgba(107,61,30,0.3)"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <span style={{fontSize:24}}>☕</span>
+            <div>
+              <div style={{fontFamily:"'Noto Serif TC',serif",fontSize:15,color:"#FFF8F0",fontWeight:700}}>野人獻曝咖啡</div>
+              <div style={{fontSize:10,color:"#D4A96A",letterSpacing:"0.1em"}}>店面庫存管理系統 v5.2</div>
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            {syncing&&<div style={{fontSize:10,color:"#D4A96A",animation:"pulse 1s infinite"}}>⏳ 同步中</div>}
+            <div style={{fontSize:10,color:"#6EE7B7",fontWeight:700}}>🔴 雲端同步中</div>
+          </div>
+        </div>
+      </div>
+
+      {toast&&<div style={{position:"fixed",top:70,left:"50%",transform:"translateX(-50%)",background:toast.type==="error"?"#7F1D1D":"#14532D",color:toast.type==="error"?"#FCA5A5":"#BBF7D0",padding:"10px 22px",borderRadius:12,zIndex:999,fontSize:13,fontWeight:600,boxShadow:"0 4px 24px rgba(0,0,0,0.3)",whiteSpace:"nowrap"}}>{toast.msg}</div>}
+
+      <ConfirmDialog config={confirm} onClose={closeConfirm}/>
+
+      <div style={{maxWidth:720,margin:"0 auto",padding:"14px 12px"}}>
+        {tab==="home"       &&<HomePage beans={beans} drip={drip} enzyme={enzyme} revenue={revenue} monthRevenue={monthRevenue} monthAcct={monthAcct} setTab={setTab}/>}
+        {tab==="inventory"  &&<InventoryPage beans={beans} drip={drip} enzyme={enzyme} dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm} apiKey={apiKey}/>}
+        {tab==="accounting" &&<AccountingPage acct={acct} dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm} apiKey={apiKey}/>}
+        {tab==="revenue"    &&<RevenuePage revenue={revenue} dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm} monthRevenue={monthRevenue} apiKey={apiKey}/>}
+        {tab==="settings"   &&<SettingsPage apiKey={apiKey} saveApiKey={saveApiKey} showToast={showToast} showConfirm={showConfirm} beans={beans} drip={drip} enzyme={enzyme} acct={acct} revenue={revenue} dbSet={dbSet}/>}
+      </div>
+
+      <div style={{position:"fixed",bottom:0,left:0,right:0,zIndex:100,background:"rgba(255,255,255,0.97)",borderTop:`2px solid ${T.cardBorder}`,display:"flex",justifyContent:"center",boxShadow:"0 -2px 16px rgba(100,60,20,0.1)"}}>
+        <div style={{display:"flex",maxWidth:720,width:"100%"}}>
+          {TABS.map(t=>(
+            <button key={t.id} onClick={()=>setTab(t.id)} style={{flex:1,padding:"11px 0 8px",border:"none",background:"transparent",borderTop:`3px solid ${tab===t.id?T.primary:"transparent"}`,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+              <span style={{fontSize:19}}>{t.icon}</span>
+              <span style={{fontSize:10,fontWeight:700,color:tab===t.id?T.primary:T.textLight}}>{t.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ════ HOME ════ */
+function HomePage({beans,drip,enzyme,revenue,monthRevenue,monthAcct,setTab}){
+  const todayStr=today();
+  const todayRev=revenue.filter(r=>r.date===todayStr).reduce((s,r)=>s+(Number(r.amount)||0),0);
+  const sizeOrder={"半磅":0,"一磅":1,"五磅":2};
+  const sortedBeans=[...beans].sort((a,b)=>{const d=(b.productionDate||"").localeCompare(a.productionDate||"");return d!==0?d:(sizeOrder[a.size]||0)-(sizeOrder[b.size]||0);});
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        {[
+          {label:"本月營收",value:fmt(monthRevenue),icon:"📈",color:"#3A7D5A",bg:"#E7F5ED"},
+          {label:"今日營收",value:fmt(todayRev),icon:"💵",color:"#4A7C59",bg:"#F0FFF4"},
+          {label:"本月支出",value:fmt(monthAcct),icon:"💰",color:T.primary,bg:T.primaryLight},
+          {label:"本月利潤",value:fmt(monthRevenue-monthAcct),icon:"📊",color:monthRevenue>=monthAcct?"#3A7D5A":"#B04848",bg:monthRevenue>=monthAcct?"#E7F5ED":"#FAE8E8"},
+        ].map(s=>(
+          <Card key={s.label} style={{background:s.bg,borderColor:`${s.color}22`,padding:"12px 13px"}}>
+            <div style={{fontSize:18,marginBottom:4}}>{s.icon}</div>
+            <div style={{fontSize:10,color:T.textLight,marginBottom:2}}>{s.label}</div>
+            <div style={{fontFamily:"'DM Mono',monospace",fontSize:16,fontWeight:700,color:s.color}}>{s.value}</div>
+          </Card>
+        ))}
+      </div>
+      <Card>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#7B4F2E",borderLeft:"3px solid #7B4F2E",paddingLeft:10}}>☕ 咖啡豆庫存（{beans.length} 品項）</div>
+          <button onClick={()=>setTab("inventory")} style={{fontSize:11,color:T.primary,background:"none",border:"none",cursor:"pointer",fontWeight:700}}>管理 →</button>
+        </div>
+        {sortedBeans.length===0?<div style={{color:T.textLight,fontSize:12,textAlign:"center",padding:"16px 0"}}>尚無咖啡豆庫存</div>
+          :sortedBeans.map(item=>(
+            <div key={item.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${T.border}`}}>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                  <span style={{fontSize:13,fontWeight:600}}>{item.name}</span>
+                  {item.size&&<Badge label={item.size} color="#7B4F2E" bg="#FDF0E6"/>}
+                </div>
+                <div style={{fontSize:10,color:T.textLight,marginTop:2}}>{item.country&&`🌍 ${item.country}`}{item.productionDate&&` 📅 ${item.productionDate}`}</div>
+              </div>
+              <div style={{fontFamily:"'DM Mono',monospace",fontSize:18,fontWeight:700,color:"#7B4F2E",marginLeft:8}}>{item.quantity}<span style={{fontSize:10,color:T.textLight,fontFamily:"inherit",fontWeight:400}}> 包</span></div>
+            </div>
+          ))
+        }
+      </Card>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        {[{label:"🫖 濾掛",count:drip.length,color:"#4A7C59",bg:"#EAF3ED"},{label:"🧴 酵素",count:enzyme.length,color:"#3A6EA5",bg:"#E8F0FA"}].map(c=>(
+          <Card key={c.label} style={{background:c.bg,borderColor:`${c.color}22`,padding:"12px 13px"}}>
+            <div style={{fontSize:12,fontWeight:700,color:c.color,marginBottom:4}}>{c.label}</div>
+            <div style={{fontFamily:"'DM Mono',monospace",fontSize:18,fontWeight:700,color:c.color}}>{c.count} <span style={{fontSize:10,fontWeight:400}}>品項</span></div>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ════ INVENTORY PAGE ════ */
+function InventoryPage({beans,drip,enzyme,dbAdd,dbDel,showToast,showConfirm,apiKey}){
+  const [invTab,setInvTab]=useState("beans");
+  const TABS=[{id:"beans",label:"☕ 咖啡豆",color:"#7B4F2E",bg:"#FDF0E6"},{id:"drip",label:"🫖 濾掛",color:"#4A7C59",bg:"#EAF3ED"},{id:"enzyme",label:"🧴 酵素",color:"#3A6EA5",bg:"#E8F0FA"}];
+  return(
+    <div>
+      <div style={{display:"flex",gap:8,marginBottom:16}}>
+        {TABS.map(t=><button key={t.id} onClick={()=>setInvTab(t.id)} style={{flex:1,padding:"9px 4px",borderRadius:11,border:`2px solid ${invTab===t.id?t.color:T.border}`,background:invTab===t.id?t.bg:T.card,color:invTab===t.id?t.color:T.textLight,fontWeight:700,fontSize:11,cursor:"pointer"}}>{t.label}</button>)}
+      </div>
+      {invTab==="beans" &&<BeansSection  items={beans}  col="beans"  dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm} apiKey={apiKey}/>}
+      {invTab==="drip"  &&<DripSection   items={drip}   col="drip"   dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm} apiKey={apiKey}/>}
+      {invTab==="enzyme"&&<EnzymeSection items={enzyme} col="enzyme" dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm} apiKey={apiKey}/>}
+    </div>
+  );
+}
+
+/* ════ BEANS ════ */
+function BeansSection({items,col,dbAdd,dbDel,showToast,showConfirm,apiKey}){
+  const [mode,setMode]=useState("list");const [loading,setLoading]=useState(false);const [aiStatus,setAiStatus]=useState(null);
+  const [filterSize,setFilterSize]=useState("全部");const [batchItems,setBatchItems]=useState([]);
+  const [form,setForm]=useState({name:"",country:"",productionDate:"",size:"半磅",quantity:"",unitPrice:"",note:"",purchaseDate:today()});
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const COLOR="#7B4F2E";
+  const emptyItem=()=>({name:"",country:"",productionDate:"",size:"半磅",quantity:"",unitPrice:"",note:"",purchaseDate:today()});
+
+  const onRecognize=async b64=>{
+    setLoading(true);setAiStatus(null);
+    try{const r=await aiRecognize(apiKey,b64,"beans_batch");const arr=Array.isArray(r)?r:[r];
+      setBatchItems(arr.map(i=>({name:i.name||"",country:i.country||"",productionDate:i.productionDate||"",size:BEAN_SIZES.includes(i.size)?i.size:"半磅",quantity:String(i.quantity||""),unitPrice:String(i.unitPrice||""),note:i.note||"",purchaseDate:today()})));
+      setAiStatus({type:"ok"});showToast(`✅ 辨識到 ${arr.length} 個品項`);}
+    catch(e){setAiStatus({type:"error",message:e.message});}
+    setLoading(false);
+  };
+
+  const updBatch=(idx,k,v)=>setBatchItems(p=>p.map((it,i)=>i===idx?{...it,[k]:v}:it));
+  const remBatch=idx=>setBatchItems(p=>p.filter((_,i)=>i!==idx));
+
+  const confirmBatch=()=>{
+    if(batchItems.some(i=>!i.name||!i.quantity)){showToast("請填寫所有品項的品名與數量","error");return;}
+    showConfirm({title:"確認批量入庫",message:`即將新增 ${batchItems.length} 筆咖啡豆到雲端，所有手機立即同步。`,
+      onConfirm:async()=>{
+        for(const i of batchItems){const id=Date.now()+Math.random();await dbAdd(col,{...i,id,quantity:parseFloat(i.quantity)||0,unitPrice:parseFloat(i.unitPrice)||0,createdAt:new Date().toISOString()});}
+        setBatchItems([]);setAiStatus(null);showToast(`✅ 已新增 ${batchItems.length} 筆！`);setMode("list");
+      }
+    });
+  };
+
+  const confirmSingle=()=>{
+    if(!form.name||!form.quantity){showToast("請填寫品名與數量","error");return;}
+    showConfirm({title:"確認新增",message:`新增「${form.name}」${form.quantity}包到雲端？`,
+      onConfirm:async()=>{await dbAdd(col,{...form,id:Date.now(),quantity:parseFloat(form.quantity)||0,unitPrice:parseFloat(form.unitPrice)||0,createdAt:new Date().toISOString()});setForm(emptyItem());setAiStatus(null);showToast("✅ 已新增並同步！");setMode("list");}
+    });
+  };
+
+  const sizeOrder={"半磅":0,"一磅":1,"五磅":2};
+  const sorted=[...items].filter(i=>filterSize==="全部"||i.size===filterSize).sort((a,b)=>{const d=(b.productionDate||"").localeCompare(a.productionDate||"");return d!==0?d:(sizeOrder[a.size]||0)-(sizeOrder[b.size]||0);});
+
+  return(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <div style={{fontWeight:700,fontSize:14,color:COLOR}}>☕ 咖啡豆（{items.length}）</div>
+        <button onClick={()=>{setMode(mode==="add"?"list":"add");setAiStatus(null);setBatchItems([]);}} style={{padding:"7px 14px",borderRadius:10,border:`1.5px solid ${COLOR}`,background:mode==="add"?COLOR:"transparent",color:mode==="add"?"#FFF":COLOR,fontSize:12,fontWeight:700,cursor:"pointer"}}>
+          {mode==="add"?"✕ 取消":"＋ 新增"}
+        </button>
+      </div>
+
+      {mode==="add"&&(
+        <Card style={{marginBottom:16,borderColor:`${COLOR}33`}}>
+          <div style={{fontSize:13,fontWeight:700,color:COLOR,marginBottom:12}}>📦 進貨入庫（支援一張單多品項）</div>
+          <ImageUpload onRecognize={onRecognize} loading={loading} aiStatus={aiStatus} setAiStatus={setAiStatus} hasKey={!!apiKey}/>
+          {batchItems.length>0&&(
+            <div style={{marginTop:14}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{fontSize:12,fontWeight:700,color:COLOR}}>辨識結果 — {batchItems.length} 品項</div>
+                <GBtn onClick={()=>setBatchItems(p=>[...p,emptyItem()])} sm>＋ 加品項</GBtn>
+              </div>
+              {batchItems.map((item,idx)=>(
+                <div key={idx} style={{background:"#FDF8F3",border:`1.5px solid ${COLOR}22`,borderRadius:11,padding:"12px",marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                    <span style={{fontSize:12,fontWeight:700,color:COLOR}}>品項 {idx+1}</span>
+                    <GBtn onClick={()=>remBatch(idx)} color="#B04848" sm>移除</GBtn>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                      <Field label="品名 *" value={item.name} onChange={v=>updBatch(idx,"name",v)} placeholder="品名"/>
+                      <Field label="產地" value={item.country} onChange={v=>updBatch(idx,"country",v)} placeholder="產地"/>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                      <Field label="烘焙日期" type="date" value={item.productionDate} onChange={v=>updBatch(idx,"productionDate",v)}/>
+                      <Field label="入庫日期" type="date" value={item.purchaseDate} onChange={v=>updBatch(idx,"purchaseDate",v)}/>
+                    </div>
+                    <div><Lbl c="規格"/><div style={{display:"flex",gap:6,marginTop:5}}>
+                      {BEAN_SIZES.map(s=><button key={s} onClick={()=>updBatch(idx,"size",s)} style={{flex:1,padding:"7px 0",borderRadius:8,border:`1.5px solid ${item.size===s?COLOR:T.border}`,background:item.size===s?`${COLOR}15`:"#FAF7F2",color:item.size===s?COLOR:T.textMid,fontWeight:700,fontSize:12,cursor:"pointer"}}>{s}</button>)}
+                    </div></div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                      <Field label="數量 *" value={item.quantity} onChange={v=>updBatch(idx,"quantity",v)} placeholder="0" mono/>
+                      <Field label="入庫成本 NT$" value={item.unitPrice} onChange={v=>updBatch(idx,"unitPrice",v)} placeholder="0" mono/>
+                    </div>
+                    {item.quantity&&item.unitPrice&&<div style={{fontSize:11,color:T.textLight,textAlign:"right"}}>小計：{fmt((parseFloat(item.quantity)||0)*(parseFloat(item.unitPrice)||0))}</div>}
+                  </div>
+                </div>
+              ))}
+              <div style={{padding:"9px 0",borderTop:`1px solid ${T.border}`,display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                <span style={{fontSize:12,color:T.textMid}}>預估總進貨金額</span>
+                <span style={{fontFamily:"'DM Mono',monospace",fontWeight:700,color:COLOR}}>{fmt(batchItems.reduce((s,i)=>s+(parseFloat(i.quantity)||0)*(parseFloat(i.unitPrice)||0),0))}</span>
+              </div>
+              <PBtn onClick={confirmBatch} full>✅ 確認批量入庫（{batchItems.length} 品項）</PBtn>
+            </div>
+          )}
+          {batchItems.length===0&&(
+            <div style={{marginTop:14}}>
+              <div style={{fontSize:11,color:T.textLight,textAlign:"center",marginBottom:10}}>—— 或手動新增單一品項 ——</div>
+              <div style={{display:"flex",flexDirection:"column",gap:9}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}><Field label="品名 *" value={form.name} onChange={v=>set("name",v)} placeholder="耶加雪菲 G1"/><Field label="產地國家" value={form.country} onChange={v=>set("country",v)} placeholder="Ethiopia"/></div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}><Field label="烘焙日期" type="date" value={form.productionDate} onChange={v=>set("productionDate",v)}/><Field label="入庫日期" type="date" value={form.purchaseDate} onChange={v=>set("purchaseDate",v)}/></div>
+                <div><Lbl c="規格 Size"/><div style={{display:"flex",gap:6,marginTop:5}}>{BEAN_SIZES.map(s=><button key={s} onClick={()=>set("size",s)} style={{flex:1,padding:"9px 0",borderRadius:9,border:`1.5px solid ${form.size===s?COLOR:T.border}`,background:form.size===s?`${COLOR}15`:"#FAF7F2",color:form.size===s?COLOR:T.textMid,fontWeight:700,fontSize:12,cursor:"pointer"}}>{s}</button>)}</div></div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}><Field label="數量 (包) *" value={form.quantity} onChange={v=>set("quantity",v)} placeholder="0" mono/><Field label="入庫成本 NT$" value={form.unitPrice} onChange={v=>set("unitPrice",v)} placeholder="0" mono/></div>
+                <Field label="備註" value={form.note} onChange={v=>set("note",v)} placeholder="批次、處理法等…"/>
+                <PBtn onClick={confirmSingle} full>💾 新增咖啡豆</PBtn>
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
+
+      <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+        {["全部",...BEAN_SIZES].map(s=><button key={s} onClick={()=>setFilterSize(s)} style={{padding:"5px 12px",borderRadius:20,border:`1.5px solid ${filterSize===s?COLOR:T.border}`,background:filterSize===s?`${COLOR}15`:T.card,color:filterSize===s?COLOR:T.textLight,fontSize:11,fontWeight:700,cursor:"pointer"}}>{s}</button>)}
+      </div>
+
+      {sorted.length===0?<div style={{textAlign:"center",color:T.textLight,padding:"40px 0",fontSize:13}}>🫘 尚無咖啡豆記錄</div>
+        :sorted.map(item=>(
+          <div key={item.id} style={{background:T.card,border:`1.5px solid ${T.cardBorder}`,borderRadius:13,padding:"12px 14px",marginBottom:9,boxShadow:T.shadow}}>
+            <div style={{display:"flex",justifyContent:"space-between"}}>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginBottom:3}}><span style={{fontSize:14,fontWeight:700}}>{item.name}</span>{item.size&&<Badge label={item.size} color={COLOR} bg="#FDF0E6"/>}</div>
+                <div style={{fontSize:11,color:T.textLight,display:"flex",gap:8,flexWrap:"wrap"}}>{item.country&&<span>🌍 {item.country}</span>}{item.productionDate&&<span>📅 {item.productionDate}</span>}{item.purchaseDate&&<span>🛒 {item.purchaseDate}</span>}</div>
+              </div>
+              <div style={{textAlign:"right",minWidth:54}}><div style={{fontFamily:"'DM Mono',monospace",fontSize:22,fontWeight:700,color:COLOR}}>{item.quantity}</div><div style={{fontSize:10,color:T.textLight}}>包</div></div>
+            </div>
+            {(item.unitPrice>0||item.note)&&<div style={{marginTop:6,paddingTop:6,borderTop:`1px solid ${T.border}`,display:"flex",justifyContent:"space-between",fontSize:11,color:T.textLight}}><span>{item.note}</span>{item.unitPrice>0&&<span style={{fontFamily:"'DM Mono',monospace"}}>成本 {fmt(item.unitPrice)}/包</span>}</div>}
+            <button onClick={()=>showConfirm({title:"確認刪除",message:`刪除「${item.name}」？此操作所有手機同步生效。`,triple:true,onConfirm:async()=>{await dbDel(col,item.id);showToast("已刪除");}})} style={{marginTop:6,fontSize:11,color:"#C0A090",background:"none",border:"none",cursor:"pointer",padding:0}}>🗑️ 刪除此筆</button>
+          </div>
+        ))
+      }
+    </div>
+  );
+}
+
+/* ════ DRIP ════ */
+function DripSection({items,col,dbAdd,dbDel,showToast,showConfirm,apiKey}){
+  const [mode,setMode]=useState("list");const [loading,setLoading]=useState(false);const [aiStatus,setAiStatus]=useState(null);
+  const [form,setForm]=useState({name:"",purchaseDate:today(),quantity:"",unitPrice:"",note:""});
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));const COLOR="#4A7C59";
+  const onRecognize=async b64=>{setLoading(true);setAiStatus(null);try{const r=await aiRecognize(apiKey,b64,"drip");setForm(f=>({...f,name:r.name||f.name,purchaseDate:r.purchaseDate||f.purchaseDate,quantity:r.quantity?String(r.quantity):f.quantity,unitPrice:r.unitPrice?String(r.unitPrice):f.unitPrice,note:r.note||f.note}));setAiStatus({type:"ok"});}catch(e){setAiStatus({type:"error",message:e.message});}setLoading(false);};
+  const confirmAdd=()=>{if(!form.name||!form.quantity){showToast("請填寫品名與數量","error");return;}showConfirm({title:"確認新增",message:`新增「${form.name}」${form.quantity}盒到雲端？`,onConfirm:async()=>{await dbAdd(col,{...form,id:Date.now(),quantity:parseFloat(form.quantity)||0,unitPrice:parseFloat(form.unitPrice)||0,createdAt:new Date().toISOString()});setForm({name:"",purchaseDate:today(),quantity:"",unitPrice:"",note:""});setAiStatus(null);showToast("✅ 已新增！");setMode("list");}});};
+  const sorted=[...items].sort((a,b)=>(b.purchaseDate||"").localeCompare(a.purchaseDate||""));
+  return(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <div style={{fontWeight:700,fontSize:14,color:COLOR}}>🫖 濾掛（{items.length}）</div>
+        <button onClick={()=>{setMode(mode==="add"?"list":"add");setAiStatus(null);}} style={{padding:"7px 14px",borderRadius:10,border:`1.5px solid ${COLOR}`,background:mode==="add"?COLOR:"transparent",color:mode==="add"?"#FFF":COLOR,fontSize:12,fontWeight:700,cursor:"pointer"}}>{mode==="add"?"✕ 取消":"＋ 新增"}</button>
+      </div>
+      {mode==="add"&&<Card style={{marginBottom:16,borderColor:`${COLOR}33`}}><ImageUpload onRecognize={onRecognize} loading={loading} aiStatus={aiStatus} setAiStatus={setAiStatus} hasKey={!!apiKey}/><div style={{height:12}}/><div style={{display:"flex",flexDirection:"column",gap:9}}><Field label="品名 *" value={form.name} onChange={v=>set("name",v)} placeholder="耶加雪菲濾掛"/><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}><Field label="進貨日期" type="date" value={form.purchaseDate} onChange={v=>set("purchaseDate",v)}/><Field label="數量 (盒) *" value={form.quantity} onChange={v=>set("quantity",v)} placeholder="0" mono/></div><Field label="入庫成本 NT$" value={form.unitPrice} onChange={v=>set("unitPrice",v)} placeholder="0" mono/><Field label="備註" value={form.note} onChange={v=>set("note",v)} placeholder="選填…"/><PBtn onClick={confirmAdd} full>💾 新增濾掛</PBtn></div></Card>}
+      {sorted.length===0?<div style={{textAlign:"center",color:T.textLight,padding:"40px 0",fontSize:13}}>🫖 尚無濾掛記錄</div>
+        :sorted.map(item=>(
+          <div key={item.id} style={{background:T.card,border:`1.5px solid ${T.cardBorder}`,borderRadius:13,padding:"12px 14px",marginBottom:9,boxShadow:T.shadow}}>
+            <div style={{display:"flex",justifyContent:"space-between"}}><div><div style={{fontSize:14,fontWeight:700,marginBottom:3}}>{item.name}</div><span style={{fontSize:11,color:T.textLight}}>📅 {item.purchaseDate}{item.note?` · ${item.note}`:""}</span></div><div style={{textAlign:"right"}}><div style={{fontFamily:"'DM Mono',monospace",fontSize:20,fontWeight:700,color:COLOR}}>{item.quantity}</div><div style={{fontSize:10,color:T.textLight}}>盒</div>{item.unitPrice>0&&<div style={{fontSize:10,color:T.textLight}}>{fmt(item.unitPrice)}/盒</div>}</div></div>
+            <button onClick={()=>showConfirm({title:"確認刪除",message:`刪除「${item.name}」？`,triple:true,onConfirm:async()=>{await dbDel(col,item.id);showToast("已刪除");}})} style={{marginTop:6,fontSize:11,color:"#C0A090",background:"none",border:"none",cursor:"pointer",padding:0}}>🗑️ 刪除</button>
+          </div>
+        ))}
+    </div>
+  );
+}
+
+/* ════ ENZYME ════ */
+function EnzymeSection({items,col,dbAdd,dbDel,showToast,showConfirm,apiKey}){
+  const [mode,setMode]=useState("list");const [loading,setLoading]=useState(false);const [aiStatus,setAiStatus]=useState(null);const [sortDir,setSortDir]=useState("asc");
+  const [form,setForm]=useState({name:"",quantity:"",unitPrice:"",note:"",purchaseDate:today()});
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));const COLOR="#3A6EA5";
+  const onRecognize=async b64=>{setLoading(true);setAiStatus(null);try{const r=await aiRecognize(apiKey,b64,"enzyme");setForm(f=>({...f,name:r.name||f.name,quantity:r.quantity?String(r.quantity):f.quantity,unitPrice:r.unitPrice?String(r.unitPrice):f.unitPrice,note:r.note||f.note,purchaseDate:r.purchaseDate||f.purchaseDate}));setAiStatus({type:"ok"});}catch(e){setAiStatus({type:"error",message:e.message});}setLoading(false);};
+  const confirmAdd=()=>{if(!form.name||!form.quantity){showToast("請填寫品名與數量","error");return;}showConfirm({title:"確認新增",message:`新增「${form.name}」${form.quantity}件到雲端？`,onConfirm:async()=>{await dbAdd(col,{...form,id:Date.now(),quantity:parseFloat(form.quantity)||0,unitPrice:parseFloat(form.unitPrice)||0,createdAt:new Date().toISOString()});setForm({name:"",quantity:"",unitPrice:"",note:"",purchaseDate:today()});setAiStatus(null);showToast("✅ 已新增！");setMode("list");}});};
+  const sorted=[...items].sort((a,b)=>sortDir==="asc"?a.unitPrice-b.unitPrice:b.unitPrice-a.unitPrice);
+  return(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <div style={{fontWeight:700,fontSize:14,color:COLOR}}>🧴 酵素（{items.length}）</div>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>setSortDir(d=>d==="asc"?"desc":"asc")} style={{padding:"7px 10px",borderRadius:9,border:`1.5px solid ${T.border}`,background:T.card,color:T.textMid,fontSize:11,fontWeight:700,cursor:"pointer"}}>價格 {sortDir==="asc"?"↑":"↓"}</button>
+          <button onClick={()=>{setMode(mode==="add"?"list":"add");setAiStatus(null);}} style={{padding:"7px 14px",borderRadius:10,border:`1.5px solid ${COLOR}`,background:mode==="add"?COLOR:"transparent",color:mode==="add"?"#FFF":COLOR,fontSize:12,fontWeight:700,cursor:"pointer"}}>{mode==="add"?"✕ 取消":"＋ 新增"}</button>
+        </div>
+      </div>
+      {mode==="add"&&<Card style={{marginBottom:16,borderColor:`${COLOR}33`}}><ImageUpload onRecognize={onRecognize} loading={loading} aiStatus={aiStatus} setAiStatus={setAiStatus} hasKey={!!apiKey}/><div style={{height:12}}/><div style={{display:"flex",flexDirection:"column",gap:9}}><Field label="品名 *" value={form.name} onChange={v=>set("name",v)} placeholder="鳳梨酵素"/><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}><Field label="數量 *" value={form.quantity} onChange={v=>set("quantity",v)} placeholder="0" mono/><Field label="單價 NT$" value={form.unitPrice} onChange={v=>set("unitPrice",v)} placeholder="0" mono/></div><Field label="進貨日期" type="date" value={form.purchaseDate} onChange={v=>set("purchaseDate",v)}/><Field label="備註" value={form.note} onChange={v=>set("note",v)} placeholder="選填…"/><PBtn onClick={confirmAdd} full>💾 新增酵素</PBtn></div></Card>}
+      {sorted.length===0?<div style={{textAlign:"center",color:T.textLight,padding:"40px 0",fontSize:13}}>🧴 尚無酵素記錄</div>
+        :sorted.map(item=>(
+          <div key={item.id} style={{background:T.card,border:`1.5px solid ${T.cardBorder}`,borderRadius:13,padding:"12px 14px",marginBottom:9,boxShadow:T.shadow}}>
+            <div style={{display:"flex",justifyContent:"space-between"}}><div style={{flex:1}}><div style={{fontSize:14,fontWeight:700,marginBottom:3}}>{item.name}</div>{item.purchaseDate&&<span style={{fontSize:11,color:T.textLight}}>📅 {item.purchaseDate}{item.note?` · ${item.note}`:""}</span>}</div><div style={{textAlign:"right"}}><div style={{fontFamily:"'DM Mono',monospace",fontSize:15,fontWeight:700,color:COLOR}}>{fmt(item.unitPrice)}</div><div style={{fontSize:11,color:T.textLight}}>×{item.quantity}件</div></div></div>
+            <button onClick={()=>showConfirm({title:"確認刪除",message:`刪除「${item.name}」？`,triple:true,onConfirm:async()=>{await dbDel(col,item.id);showToast("已刪除");}})} style={{marginTop:6,fontSize:11,color:"#C0A090",background:"none",border:"none",cursor:"pointer",padding:0}}>🗑️ 刪除</button>
+          </div>
+        ))}
+    </div>
+  );
+}
+
+/* ════ ACCOUNTING ════ */
+function AccountingPage({acct,dbAdd,dbDel,showToast,showConfirm,apiKey}){
+  const [mode,setMode]=useState("list");const [loading,setLoading]=useState(false);const [aiStatus,setAiStatus]=useState(null);const [filterCat,setFilterCat]=useState("all");
+  const [form,setForm]=useState({date:today(),merchant:"",amount:"",currency:"TWD",category:"beans_in",note:""});
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const onRecognize=async b64=>{setLoading(true);setAiStatus(null);try{const r=await aiRecognize(apiKey,b64,"accounting");setForm(f=>({...f,merchant:r.merchant||f.merchant,amount:r.amount?String(r.amount):f.amount,currency:r.currency||f.currency,date:r.date||f.date,category:ACCT_CATS.find(c=>c.id===r.category)?r.category:f.category,note:r.note||f.note}));setAiStatus({type:"ok"});}catch(e){setAiStatus({type:"error",message:e.message});}setLoading(false);};
+  const confirmAdd=()=>{if(!form.merchant||!form.amount){showToast("請填寫商家與金額","error");return;}showConfirm({title:"確認新增帳務",message:`新增「${form.merchant}」${fmt(form.amount)} 支出到雲端？`,onConfirm:async()=>{await dbAdd("acct",{...form,id:Date.now(),amount:parseFloat(form.amount),createdAt:new Date().toISOString()});setForm({date:today(),merchant:"",amount:"",currency:"TWD",category:"beans_in",note:""});setAiStatus(null);showToast("✅ 已新增！");setMode("list");}});};
+  const filtered=filterCat==="all"?acct:acct.filter(e=>e.category===filterCat);
+  const total=filtered.reduce((s,e)=>s+(Number(e.amount)||0),0);
+  return(
+    <div>
+      <div style={{display:"flex",gap:8,marginBottom:16}}>{["list","add"].map(v=><button key={v} onClick={()=>{setMode(v);setAiStatus(null);}} style={{flex:1,padding:"9px 0",borderRadius:10,border:`2px solid ${v==="add"?T.primary:T.border}`,background:mode===v?(v==="add"?T.primary:T.primaryLight):T.card,color:mode===v?(v==="add"?"#FFF":T.primary):T.textLight,fontWeight:700,fontSize:13,cursor:"pointer"}}>{v==="add"?"➕ 新增帳務":"📋 帳務明細"}</button>)}</div>
+      {mode==="add"&&(
+        <Card style={{marginBottom:16}}>
+          <div style={{fontSize:13,fontWeight:700,color:T.primary,marginBottom:12}}>新增支出記錄</div>
+          <ImageUpload onRecognize={onRecognize} loading={loading} aiStatus={aiStatus} setAiStatus={setAiStatus} hasKey={!!apiKey}/>
+          <div style={{height:12}}/><div style={{display:"flex",flexDirection:"column",gap:9}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}><Field label="商家/項目 *" value={form.merchant} onChange={v=>set("merchant",v)} placeholder="商家名稱"/><Field label="日期" type="date" value={form.date} onChange={v=>set("date",v)}/></div>
+            <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:8}}><Field label="金額 *" value={form.amount} onChange={v=>set("amount",v)} placeholder="0" mono/><Sel label="幣別" value={form.currency} onChange={v=>set("currency",v)} options={Object.keys(CURRENCIES).map(c=>({value:c,label:c}))}/></div>
+            <div><Lbl c="分類"/><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginTop:6}}>{ACCT_CATS.map(c=><button key={c.id} onClick={()=>set("category",c.id)} style={{padding:"9px 9px",borderRadius:9,border:`1.5px solid ${form.category===c.id?c.color:T.border}`,background:form.category===c.id?c.bg:T.card,color:form.category===c.id?c.color:T.textMid,fontWeight:700,fontSize:11,cursor:"pointer",textAlign:"left",display:"flex",alignItems:"center",gap:5}}><span style={{fontSize:14}}>{c.icon}</span><span>{c.label}</span></button>)}</div></div>
+            <Field label="備註" value={form.note} onChange={v=>set("note",v)} placeholder="選填…"/><PBtn onClick={confirmAdd} full>💾 新增帳務記錄</PBtn>
+          </div>
+        </Card>
+      )}
+      {mode==="list"&&(<>
+        <div style={{display:"flex",gap:5,marginBottom:10,overflowX:"auto",paddingBottom:4}}>
+          <button onClick={()=>setFilterCat("all")} style={{padding:"5px 12px",borderRadius:20,border:`1.5px solid ${filterCat==="all"?T.primary:T.border}`,background:filterCat==="all"?T.primaryLight:T.card,color:filterCat==="all"?T.primary:T.textLight,fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>全部</button>
+          {ACCT_CATS.map(c=><button key={c.id} onClick={()=>setFilterCat(c.id)} style={{padding:"5px 10px",borderRadius:20,border:`1.5px solid ${filterCat===c.id?c.color:T.border}`,background:filterCat===c.id?c.bg:T.card,color:filterCat===c.id?c.color:T.textLight,fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>{c.icon} {c.label}</button>)}
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",padding:"9px 13px",background:T.primaryLight,borderRadius:10,marginBottom:10}}>
+          <span style={{fontSize:12,fontWeight:700,color:T.primary}}>{filtered.length} 筆</span>
+          <span style={{fontFamily:"'DM Mono',monospace",fontSize:14,fontWeight:700,color:T.primary}}>{fmt(total)}</span>
+        </div>
+        {filtered.length===0?<div style={{textAlign:"center",color:T.textLight,padding:"40px 0",fontSize:13}}>尚無帳務記錄</div>
+          :filtered.map(e=>{const cat=ACCT_CATS.find(c=>c.id===e.category)||ACCT_CATS[0];return(
+            <div key={e.id} style={{display:"flex",alignItems:"center",gap:10,padding:"11px 12px",background:T.card,border:`1.5px solid ${T.cardBorder}`,borderRadius:13,marginBottom:8,boxShadow:T.shadow}}>
+              <div style={{width:36,height:36,borderRadius:9,background:cat.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>{cat.icon}</div>
+              <div style={{flex:1,minWidth:0}}><div style={{fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.merchant}</div><div style={{fontSize:11,color:T.textLight}}>{e.date} · <span style={{color:cat.color,fontWeight:700}}>{cat.label}</span>{e.note?` · ${e.note}`:""}</div></div>
+              <div style={{fontFamily:"'DM Mono',monospace",fontSize:13,fontWeight:700,color:cat.color,flexShrink:0}}>{fmt(e.amount,e.currency)}</div>
+              <button onClick={()=>showConfirm({title:"確認刪除",message:"刪除此筆帳務？",triple:true,onConfirm:async()=>{await dbDel("acct",e.id);showToast("已刪除");}})} style={{background:"none",border:"none",color:"#C0A090",cursor:"pointer",fontSize:13,padding:"0 2px",flexShrink:0}}>✕</button>
+            </div>
+          );})}
+      </>)}
+    </div>
+  );
+}
+
+/* ════ REVENUE ════ */
+function RevenuePage({revenue,dbAdd,dbDel,showToast,showConfirm,monthRevenue,apiKey}){
+  const [mode,setMode]=useState("list");const [loading,setLoading]=useState(false);const [aiStatus,setAiStatus]=useState(null);
+  const [form,setForm]=useState({date:today(),description:"",amount:"",note:""});
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const onRecognize=async b64=>{setLoading(true);setAiStatus(null);try{const r=await aiRecognize(apiKey,b64,"revenue");setForm(f=>({...f,date:r.date||f.date,description:r.description||f.description,amount:r.amount?String(r.amount):f.amount,note:r.note||f.note}));setAiStatus({type:"ok"});}catch(e){setAiStatus({type:"error",message:e.message});}setLoading(false);};
+  const confirmAdd=()=>{if(!form.description||!form.amount){showToast("請填寫說明與金額","error");return;}showConfirm({title:"確認新增營收",message:`新增「${form.description}」${fmt(form.amount)}到雲端？`,onConfirm:async()=>{await dbAdd("revenue",{...form,id:Date.now(),amount:parseFloat(form.amount),createdAt:new Date().toISOString()});setForm({date:today(),description:"",amount:"",note:""});setAiStatus(null);showToast("✅ 已新增！");setMode("list");}});};
+  const grouped={};revenue.forEach(r=>{const d=r.date||"unknown";if(!grouped[d])grouped[d]=[];grouped[d].push(r);});
+  const dates=Object.keys(grouped).sort((a,b)=>b.localeCompare(a));
+  const todayTotal=(grouped[today()]||[]).reduce((s,r)=>s+(Number(r.amount)||0),0);
+  return(
+    <div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+        <Card style={{background:"#E7F5ED",borderColor:"#3A7D5A22"}}><div style={{fontSize:10,color:T.textLight,marginBottom:2}}>本月總營收</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:17,fontWeight:700,color:"#3A7D5A"}}>{fmt(monthRevenue)}</div></Card>
+        <Card style={{background:"#F0FFF4",borderColor:"#4A7C5922"}}><div style={{fontSize:10,color:T.textLight,marginBottom:2}}>今日營收</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:17,fontWeight:700,color:"#4A7C59"}}>{fmt(todayTotal)}</div></Card>
+      </div>
+      <div style={{display:"flex",gap:8,marginBottom:14}}>{["list","add"].map(v=><button key={v} onClick={()=>{setMode(v);setAiStatus(null);}} style={{flex:1,padding:"9px 0",borderRadius:10,border:`2px solid ${v==="add"?"#3A7D5A":T.border}`,background:mode===v?(v==="add"?"#3A7D5A":"#E7F5ED"):T.card,color:mode===v?(v==="add"?"#FFF":"#3A7D5A"):T.textLight,fontWeight:700,fontSize:13,cursor:"pointer"}}>{v==="add"?"➕ 新增營收":"📋 營收明細"}</button>)}</div>
+      {mode==="add"&&(
+        <Card style={{marginBottom:16,borderColor:"#3A7D5A33"}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#3A7D5A",marginBottom:12}}>新增每日營收</div>
+          <ImageUpload onRecognize={onRecognize} loading={loading} aiStatus={aiStatus} setAiStatus={setAiStatus} hasKey={!!apiKey}/>
+          <div style={{height:12}}/><div style={{display:"flex",flexDirection:"column",gap:9}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}><Field label="日期 *" type="date" value={form.date} onChange={v=>set("date",v)}/><Field label="金額 NT$ *" value={form.amount} onChange={v=>set("amount",v)} placeholder="0" mono/></div>
+            <Field label="收入說明 *" value={form.description} onChange={v=>set("description",v)} placeholder="當日門市營業額、外送收入…"/>
+            <Field label="備註" value={form.note} onChange={v=>set("note",v)} placeholder="選填…"/>
+            <PBtn onClick={confirmAdd} full green>💾 新增營收記錄</PBtn>
+          </div>
+        </Card>
+      )}
+      {mode==="list"&&(dates.length===0?<div style={{textAlign:"center",color:T.textLight,padding:"40px 0",fontSize:13}}>尚無營收記錄</div>
+        :dates.map(date=>{const dayItems=grouped[date];const dayTotal=dayItems.reduce((s,r)=>s+(Number(r.amount)||0),0);return(
+          <div key={date} style={{marginBottom:14}}>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"7px 10px",background:"#E7F5ED",borderRadius:9,marginBottom:6}}>
+              <span style={{fontSize:12,fontWeight:700,color:"#3A7D5A"}}>📅 {date}</span>
+              <span style={{fontFamily:"'DM Mono',monospace",fontSize:14,fontWeight:700,color:"#3A7D5A"}}>{fmt(dayTotal)}</span>
+            </div>
+            {dayItems.map(r=>(
+              <div key={r.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",background:T.card,border:`1.5px solid ${T.cardBorder}`,borderRadius:12,marginBottom:6,boxShadow:T.shadow}}>
+                <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600}}>{r.description}</div>{r.note&&<div style={{fontSize:11,color:T.textLight}}>{r.note}</div>}</div>
+                <div style={{fontFamily:"'DM Mono',monospace",fontSize:14,fontWeight:700,color:"#3A7D5A",flexShrink:0}}>{fmt(r.amount)}</div>
+                <button onClick={()=>showConfirm({title:"確認刪除",message:"刪除此筆營收？",triple:true,onConfirm:async()=>{await dbDel("revenue",r.id);showToast("已刪除");}})} style={{background:"none",border:"none",color:"#C0A090",cursor:"pointer",fontSize:13,padding:"0 2px"}}>✕</button>
+              </div>
+            ))}
+          </div>
+        );})
+      )}
+    </div>
+  );
+}
+
+/* ════ SETTINGS ════ */
+function SettingsPage({apiKey,saveApiKey,showToast,showConfirm,beans,drip,enzyme,acct,revenue,dbSet}){
+  const [key,setKey]=useState(apiKey);const [showKey,setShowKey]=useState(false);
+  const [backupLog,setBackupLog]=useState(()=>LS.get("wc5_backuplog",[]));
+  const importRef=useRef();
+  const fmtDate=iso=>{if(!iso)return"";const d=new Date(iso);return`${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;};
+
+  const exportBackup=()=>{
+    const dateStr=new Date().toISOString().slice(0,10).replace(/-/g,"");
+    const todayBak=backupLog.filter(b=>b.dateStr===dateStr&&b.type!=="import");
+    const ver=todayBak.length+1;const verStr=`v${String(ver).padStart(2,"0")}`;
+    const total=beans.length+drip.length+enzyme.length+acct.length+revenue.length;
+    const filename=`野人咖啡備份_${dateStr}_${verStr}.json`;
+    const payload={meta:{appName:"野人獻曝咖啡店面庫存管理系統",version:"v5",exportedAt:new Date().toISOString(),dateStr,ver,verStr,filename,summary:{beans:beans.length,drip:drip.length,enzyme:enzyme.length,acct:acct.length,revenue:revenue.length,total}},data:{beans,drip,enzyme,acct,revenue}};
+    const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=filename;a.click();URL.revokeObjectURL(url);
+    const logEntry={id:Date.now(),dateStr,ver,verStr,filename,exportedAt:new Date().toISOString(),type:"export",summary:payload.meta.summary};
+    const newLog=[logEntry,...backupLog].slice(0,20);setBackupLog(newLog);LS.set("wc5_backuplog",newLog);
+    showToast(`✅ 已匯出：${filename}`);
+  };
+
+  const importBackup=e=>{
+    const file=e.target.files[0];if(!file)return;
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      try{
+        const payload=JSON.parse(ev.target.result);
+        if(!payload.data||!payload.meta){showToast("格式錯誤，非有效備份檔","error");return;}
+        const {beans:b,drip:d,enzyme:en,acct:a,revenue:rv}=payload.data;
+        showConfirm({title:"確認匯入備份",message:`匯入「${payload.meta.filename}」\n共 ${payload.meta.summary?.total||0} 筆資料。\n⚠️ 雲端現有資料將被覆蓋，所有手機同步！`,
+          onConfirm:async()=>{
+            if(b?.length)await dbSet("beans",b);if(d?.length)await dbSet("drip",d);
+            if(en?.length)await dbSet("enzyme",en);if(a?.length)await dbSet("acct",a);if(rv?.length)await dbSet("revenue",rv);
+            const logEntry={id:Date.now(),dateStr:new Date().toISOString().slice(0,10).replace(/-/g,""),filename:payload.meta.filename,importedAt:new Date().toISOString(),type:"import",summary:payload.meta.summary};
+            const newLog=[logEntry,...backupLog].slice(0,20);setBackupLog(newLog);LS.set("wc5_backuplog",newLog);
+            showToast(`✅ 已還原：${payload.meta.filename}`);
+          }
+        });
+      }catch{showToast("讀取失敗，請確認檔案格式","error");}
+      importRef.current.value="";
+    };
+    reader.readAsText(file);
+  };
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      {/* Firebase status */}
+      <Card style={{background:"#E7F5ED",borderColor:"#3A7D5A33"}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#3A7D5A",marginBottom:6}}>🔥 Firebase 雲端同步</div>
+        <div style={{fontSize:12,color:"#2E7D32"}}>✅ 已連線 ifreetimecafe-5dee3，所有手機資料即時同步中</div>
+      </Card>
+
+      {/* API Key */}
+      <Card>
+        <div style={{fontSize:13,fontWeight:700,color:T.primary,borderLeft:`3px solid ${T.primary}`,paddingLeft:10,marginBottom:14}}>🤖 AI 辨識設定</div>
+        <div style={{fontSize:12,color:T.textMid,marginBottom:14,lineHeight:1.7}}>Anthropic API Key（每支手機分別設定，只存在該手機本機）<br/><a href="https://console.anthropic.com" target="_blank" style={{color:T.primary,fontWeight:700}}>console.anthropic.com</a></div>
+        <div style={{display:"flex",gap:8,marginBottom:10}}>
+          <input type={showKey?"text":"password"} value={key} onChange={e=>setKey(e.target.value)} placeholder="sk-ant-api…" style={{flex:1,background:"#FAF7F2",border:`1.5px solid ${T.border}`,borderRadius:10,padding:"11px 12px",color:T.text,fontSize:13,outline:"none",fontFamily:"'DM Mono',monospace"}}/>
+          <button onClick={()=>setShowKey(s=>!s)} style={{padding:"11px 14px",borderRadius:10,border:`1.5px solid ${T.border}`,background:T.card,color:T.textMid,cursor:"pointer",fontSize:14}}>{showKey?"🙈":"👁️"}</button>
+        </div>
+        <PBtn onClick={()=>{saveApiKey(key.trim());showToast("✅ API Key 已儲存！");}} full>儲存 API Key</PBtn>
+        {apiKey&&<div style={{fontSize:11,color:"#3A7D5A",textAlign:"center",marginTop:8,fontWeight:700}}>✅ API Key 已設定</div>}
+      </Card>
+
+      {/* 資料統計 */}
+      <Card>
+        <div style={{fontSize:13,fontWeight:700,color:T.primary,borderLeft:`3px solid ${T.primary}`,paddingLeft:10,marginBottom:14}}>📊 雲端資料統計</div>
+        {[{label:"☕ 咖啡豆",count:beans.length,color:"#7B4F2E"},{label:"🫖 濾掛",count:drip.length,color:"#4A7C59"},{label:"🧴 酵素",count:enzyme.length,color:"#3A6EA5"},{label:"💰 帳務",count:acct.length,color:T.primary},{label:"📈 營收",count:revenue.length,color:"#3A7D5A"}].map(s=>(
+          <div key={s.label} style={{display:"flex",justifyContent:"space-between",padding:"9px 0",borderBottom:`1px solid ${T.border}`}}>
+            <span style={{fontSize:13,color:T.textMid}}>{s.label}</span>
+            <span style={{fontFamily:"'DM Mono',monospace",fontSize:14,fontWeight:700,color:s.color}}>{s.count} 筆</span>
+          </div>
+        ))}
+        <div style={{display:"flex",justifyContent:"space-between",padding:"9px 0"}}>
+          <span style={{fontSize:13,fontWeight:700,color:T.text}}>合計</span>
+          <span style={{fontFamily:"'DM Mono',monospace",fontSize:15,fontWeight:700,color:T.primary}}>{beans.length+drip.length+enzyme.length+acct.length+revenue.length} 筆</span>
+        </div>
+      </Card>
+
+      {/* 備份匯出 */}
+      <Card style={{borderColor:"#3A6EA533"}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#3A6EA5",borderLeft:"3px solid #3A6EA5",paddingLeft:10,marginBottom:12}}>📤 備份匯出</div>
+        <div style={{fontSize:12,color:T.textMid,marginBottom:14,lineHeight:1.7}}>從雲端匯出所有資料為 JSON 備份檔。<br/><span style={{color:"#3A6EA5",fontWeight:700}}>檔名：野人咖啡備份_日期_版本號.json</span><br/>同一天多次備份自動遞增（v01、v02…）</div>
+        <PBtn onClick={exportBackup} full>📥 立即匯出備份</PBtn>
+      </Card>
+
+      {/* 備份匯入 */}
+      <Card style={{borderColor:"#4A7C5933"}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#4A7C59",borderLeft:"3px solid #4A7C59",paddingLeft:10,marginBottom:12}}>📂 匯入還原</div>
+        <div style={{fontSize:12,color:T.textMid,marginBottom:14,lineHeight:1.7}}><span style={{color:"#B04848",fontWeight:700}}>⚠️ 匯入會覆蓋雲端所有資料，所有手機同步。</span><br/>建議先匯出備份再操作。</div>
+        <button onClick={()=>importRef.current?.click()} style={{width:"100%",padding:"12px 0",borderRadius:11,border:"1.5px solid #4A7C59",background:"#EAF3ED",color:"#4A7C59",fontWeight:700,fontSize:14,cursor:"pointer"}}>📂 選擇備份檔案匯入</button>
+        <input ref={importRef} type="file" accept=".json,application/json" onChange={importBackup} style={{display:"none"}}/>
+      </Card>
+
+      {/* 備份記錄 */}
+      {backupLog.length>0&&(
+        <Card>
+          <div style={{fontSize:13,fontWeight:700,color:T.primary,borderLeft:`3px solid ${T.primary}`,paddingLeft:10,marginBottom:14}}>🗂️ 備份記錄（最近{backupLog.length}筆）</div>
+          {backupLog.map((log,idx)=>(
+            <div key={log.id||idx} style={{padding:"9px 0",borderBottom:`1px solid ${T.border}`,display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:12,fontWeight:700,color:log.type==="import"?"#4A7C59":"#3A6EA5",marginBottom:2}}>{log.type==="import"?"📂 匯入":"📤 匯出"} {log.filename}</div>
+                <div style={{fontSize:11,color:T.textLight}}>{fmtDate(log.exportedAt||log.importedAt)}{log.summary&&` · ${log.summary.total||0}筆`}</div>
+              </div>
+              <div style={{fontSize:11,fontFamily:"'DM Mono',monospace",color:T.textLight,flexShrink:0}}>{log.verStr||""}</div>
+            </div>
+          ))}
+        </Card>
+      )}
+      <div style={{textAlign:"center",fontSize:11,color:T.textLight,paddingBottom:8}}>野人獻曝咖啡店面庫存管理系統 v5<br/>🔥 Firebase 雲端同步版</div>
+    </div>
+  );
+}
+
+const root=ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App/>);
+</script>
+<script>
+if('serviceWorker' in navigator){
+  window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+}
+</script>
+</body>
+</html>

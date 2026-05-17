@@ -1,0 +1,14 @@
+{
+  "name": "野人獻曝咖啡店面庫存管理系統",
+  "short_name": "野人咖啡",
+  "description": "咖啡店庫存與帳務管理系統 v5",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F4EFE6",
+  "theme_color": "#6B3D1E",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
