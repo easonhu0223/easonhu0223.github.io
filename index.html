@@ -58,6 +58,10 @@ const ACCT_CATS = [
   {id:"marketing",label:"額外行銷費用", icon:"📢", color:"#B04848", bg:"#FAE8E8"},
 ];
 const BEAN_SIZES = ["半磅","一磅","五磅"];
+const FUND_PEOPLE = [
+  { id: "eason", name: "伊森胡", color: "#C8A24A", bg: "#FBF6E8" },
+  { id: "mimi",  name: "咪咪",   color: "#9B6BB0", bg: "#F4ECF8" },
+];
 const CURRENCIES = {TWD:"NT$",USD:"$",JPY:"¥"};
 const fmt = (n,cur="TWD") => `${CURRENCIES[cur]||cur}${Number(n||0).toLocaleString("zh-TW",{maximumFractionDigits:0})}`;
 const today = () => new Date().toISOString().slice(0,10);
@@ -300,7 +304,7 @@ function LoginScreen({onLogin}){
         <div style={{fontSize:11,color:"#5A4535",textAlign:"center",marginTop:16}}>帳號密碼已自動記憶，每次點確認即可進入</div>
       </div>
 
-      <div style={{fontSize:10,color:"#3A2515",marginTop:32,letterSpacing:"0.08em"}}>野人獻曝咖啡 店面庫存管理系統 v5.4</div>
+      <div style={{fontSize:10,color:"#3A2515",marginTop:32,letterSpacing:"0.08em"}}>野人獻曝咖啡 店面庫存管理系統 v6.0</div>
     </div>
   );
 }
@@ -362,6 +366,9 @@ function App(){
   const [enzyme,setEnzyme]=useState([]);
   const [acct,setAcct]=useState([]);
   const [revenue,setRevenue]=useState([]);
+  const [fundBuy,setFundBuy]=useState([]);
+  const [fundSell,setFundSell]=useState([]);
+  const [fundDiv,setFundDiv]=useState([]);
   const [apiKey,setApiKey]=useState(()=>LS.get("wc5_apikey",""));
   const [toast,setToast]=useState(null);
   const [confirm,setConfirm]=useState(null);
@@ -391,6 +398,9 @@ function App(){
     listen("enzyme",setEnzyme);
     listen("acct",setAcct);
     listen("revenue",setRevenue);
+    listen("fund_buy",setFundBuy);
+    listen("fund_sell",setFundSell);
+    listen("fund_div",setFundDiv);
     return()=>unsubs.forEach(u=>u());
   },[fbReady]);
 
@@ -439,6 +449,7 @@ function App(){
     {id:"inventory",icon:"📦",label:"庫存"},
     {id:"accounting",icon:"💰",label:"帳務"},
     {id:"revenue",icon:"📈",label:"營收"},
+    {id:"fund",icon:"📊",label:"基金"},
     {id:"settings",icon:"⚙️",label:"設定"},
   ];
 
@@ -451,7 +462,7 @@ function App(){
             <span style={{fontSize:24}}>☕</span>
             <div>
               <div style={{fontFamily:"'Noto Serif TC',serif",fontSize:15,color:"#FFF8F0",fontWeight:700}}>野人獻曝咖啡</div>
-              <div style={{fontSize:10,color:"#D4A96A",letterSpacing:"0.1em"}}>店面庫存管理系統 v5.4</div>
+              <div style={{fontSize:10,color:"#D4A96A",letterSpacing:"0.1em"}}>店面庫存管理系統 v6.0</div>
             </div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:6}}>
@@ -466,10 +477,11 @@ function App(){
       <ConfirmDialog config={confirm} onClose={closeConfirm}/>
 
       <div style={{maxWidth:720,margin:"0 auto",padding:"14px 12px"}}>
-        {tab==="home"       &&<HomePage beans={beans} drip={drip} enzyme={enzyme} revenue={revenue} monthRevenue={monthRevenue} monthAcct={monthAcct} setTab={setTab}/>}
+        {tab==="home"       &&<HomePage beans={beans} drip={drip} enzyme={enzyme} revenue={revenue} monthRevenue={monthRevenue} monthAcct={monthAcct} fundBuy={fundBuy} fundSell={fundSell} fundDiv={fundDiv} setTab={setTab}/>}
         {tab==="inventory"  &&<InventoryPage beans={beans} drip={drip} enzyme={enzyme} dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm} apiKey={apiKey}/>}
         {tab==="accounting" &&<AccountingPage acct={acct} dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm} apiKey={apiKey}/>}
         {tab==="revenue"    &&<RevenuePage revenue={revenue} dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm} monthRevenue={monthRevenue} apiKey={apiKey}/>}
+        {tab==="fund"       &&<FundPage fundBuy={fundBuy} fundSell={fundSell} fundDiv={fundDiv} dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm}/>}
         {tab==="settings"   &&<SettingsPage apiKey={apiKey} saveApiKey={saveApiKey} showToast={showToast} showConfirm={showConfirm} beans={beans} drip={drip} enzyme={enzyme} acct={acct} revenue={revenue} dbSet={dbSet}/>}
       </div>
 
@@ -488,11 +500,25 @@ function App(){
 }
 
 /* ════ HOME ════ */
-function HomePage({beans,drip,enzyme,revenue,monthRevenue,monthAcct,setTab}){
+function HomePage({beans,drip,enzyme,revenue,monthRevenue,monthAcct,fundBuy,fundSell,fundDiv,setTab}){
   const todayStr=today();
   const todayRev=revenue.filter(r=>r.date===todayStr).reduce((s,r)=>s+(Number(r.amount)||0),0);
   const sizeOrder={"半磅":0,"一磅":1,"五磅":2};
   const sortedBeans=[...beans].sort((a,b)=>{const d=(b.productionDate||"").localeCompare(a.productionDate||"");return d!==0?d:(sizeOrder[a.size]||0)-(sizeOrder[b.size]||0);});
+
+  // 基金統計
+  const soldBuyIds=new Set((fundSell||[]).map(s=>s.buyId).filter(Boolean));
+  const heldBuys=(fundBuy||[]).filter(b=>!soldBuyIds.has(b.id));
+  const fPool={eason:{held:0,recovered:0,dividend:0},mimi:{held:0,recovered:0,dividend:0}};
+  heldBuys.forEach(b=>{fPool.eason.held+=Number(b.amount_eason)||0;fPool.mimi.held+=Number(b.amount_mimi)||0;});
+  (fundSell||[]).forEach(s=>{const buy=(fundBuy||[]).find(b=>b.id===s.buyId);const rec=Number(s.recovered)||0;if(buy){const tot=(Number(buy.amount_eason)||0)+(Number(buy.amount_mimi)||0);if(tot>0){fPool.eason.recovered+=rec*(Number(buy.amount_eason)||0)/tot;fPool.mimi.recovered+=rec*(Number(buy.amount_mimi)||0)/tot;}}});
+  (fundDiv||[]).forEach(d=>{if(fPool[d.person])fPool[d.person].dividend+=Number(d.amount)||0;});
+  const fundByName={};
+  heldBuys.forEach(b=>{const nm=b.name||"未命名";if(!fundByName[nm])fundByName[nm]={name:nm,total:0,eason:0,mimi:0};fundByName[nm].total+=(Number(b.amount_eason)||0)+(Number(b.amount_mimi)||0);fundByName[nm].eason+=Number(b.amount_eason)||0;fundByName[nm].mimi+=Number(b.amount_mimi)||0;});
+  const fundList=Object.values(fundByName).sort((a,b)=>b.total-a.total);
+  const fundGrand=fundList.reduce((s,f)=>s+f.total,0);
+  const hasFund=(fundBuy||[]).length>0;
+
   return(
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
@@ -537,6 +563,74 @@ function HomePage({beans,drip,enzyme,revenue,monthRevenue,monthAcct,setTab}){
           </Card>
         ))}
       </div>
+
+      {/* 基金總表 */}
+      {hasFund&&(
+        <div style={{background:"linear-gradient(165deg,#2A2420 0%,#3A322A 100%)",borderRadius:20,padding:"18px 16px",boxShadow:"0 6px 24px rgba(0,0,0,0.18)",border:"1px solid #C8A24A33"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:18}}>📊</span>
+              <span style={{fontSize:14,fontWeight:700,color:"#E8C97A",fontFamily:"'Noto Serif TC',serif",letterSpacing:"0.03em"}}>基金現狀庫存營收</span>
+            </div>
+            <button onClick={()=>setTab("fund")} style={{fontSize:11,color:"#C8A24A",background:"none",border:"none",cursor:"pointer",fontWeight:700}}>詳細 →</button>
+          </div>
+
+          {/* 兩人總資產 */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
+            {FUND_PEOPLE.map(p=>{
+              const d=fPool[p.id];const totalAsset=d.held+d.recovered+d.dividend;
+              return(
+                <div key={p.id} style={{background:"rgba(255,255,255,0.05)",borderRadius:14,padding:"13px 13px",border:`1px solid ${p.color}44`}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10}}>
+                    <div style={{width:24,height:24,borderRadius:"50%",background:p.color,display:"flex",alignItems:"center",justifyContent:"center",color:"#2A2420",fontWeight:700,fontSize:12,fontFamily:"'Noto Serif TC',serif"}}>{p.name[0]}</div>
+                    <span style={{fontSize:13,fontWeight:700,color:p.color,fontFamily:"'Noto Serif TC',serif"}}>{p.name}</span>
+                  </div>
+                  <div style={{fontSize:9,color:"#9A8E80",marginBottom:1}}>庫存中</div>
+                  <div style={{fontFamily:"'DM Mono',monospace",fontSize:15,fontWeight:700,color:"#F5E6C8",marginBottom:7}}>{fmt(d.held)}</div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:3}}><span style={{color:"#9A8E80"}}>已回收</span><span style={{fontFamily:"'DM Mono',monospace",color:"#7DD3A8",fontWeight:700}}>{fmt(d.recovered)}</span></div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:8}}><span style={{color:"#9A8E80"}}>配息</span><span style={{fontFamily:"'DM Mono',monospace",color:p.color,fontWeight:700}}>{fmt(d.dividend)}</span></div>
+                  <div style={{borderTop:`1px solid ${p.color}33`,paddingTop:7}}>
+                    <div style={{fontSize:9,color:"#9A8E80"}}>總資產</div>
+                    <div style={{fontFamily:"'DM Mono',monospace",fontSize:16,fontWeight:700,color:p.color}}>{fmt(totalAsset)}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* 持有中基金佔比 */}
+          {fundList.length>0&&(
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:10}}>
+                <span style={{fontSize:11,color:"#9A8E80",fontWeight:700}}>持有中基金（{fundList.length} 支）</span>
+                <span style={{fontFamily:"'DM Mono',monospace",fontSize:13,fontWeight:700,color:"#E8C97A"}}>{fmt(fundGrand)}</span>
+              </div>
+              {fundList.map(f=>{
+                const pct=fundGrand>0?(f.total/fundGrand*100):0;
+                return(
+                  <div key={f.name} style={{marginBottom:11}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
+                      <span style={{fontSize:12,fontWeight:600,color:"#E8DCC8"}}>{f.name}</span>
+                      <div><span style={{fontFamily:"'DM Mono',monospace",fontSize:12,fontWeight:700,color:"#F5E6C8"}}>{fmt(f.total)}</span><span style={{fontSize:10,color:"#9A8E80",marginLeft:5}}>{pct.toFixed(1)}%</span></div>
+                    </div>
+                    <div style={{height:7,background:"rgba(255,255,255,0.08)",borderRadius:4,overflow:"hidden",display:"flex"}}>
+                      <div style={{height:"100%",width:`${f.total>0?f.eason/f.total*100:0}%`,background:FUND_PEOPLE[0].color}}/>
+                      <div style={{height:"100%",width:`${f.total>0?f.mimi/f.total*100:0}%`,background:FUND_PEOPLE[1].color}}/>
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{display:"flex",gap:14,marginTop:10,paddingTop:10,borderTop:"1px solid rgba(255,255,255,0.08)"}}>
+                {FUND_PEOPLE.map(p=>(
+                  <span key={p.id} style={{fontSize:10,color:p.color,fontWeight:700,display:"flex",alignItems:"center",gap:4}}>
+                    <span style={{width:8,height:8,borderRadius:2,background:p.color,display:"inline-block"}}/>{p.name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -795,19 +889,66 @@ function AccountingPage({acct,dbAdd,dbDel,showToast,showConfirm,apiKey}){
 function RevenuePage({revenue,dbAdd,dbDel,showToast,showConfirm,monthRevenue,apiKey}){
   const [mode,setMode]=useState("list");const [loading,setLoading]=useState(false);const [aiStatus,setAiStatus]=useState(null);
   const [form,setForm]=useState({date:today(),description:"",amount:"",note:""});
+  const [statYear,setStatYear]=useState(new Date().getFullYear());
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
   const onRecognize=async b64=>{setLoading(true);setAiStatus(null);try{const r=await aiRecognize(apiKey,b64,"revenue");setForm(f=>({...f,date:r.date||f.date,description:r.description||f.description,amount:r.amount?String(r.amount):f.amount,note:r.note||f.note}));setAiStatus({type:"ok"});}catch(e){setAiStatus({type:"error",message:e.message});}setLoading(false);};
   const confirmAdd=()=>{if(!form.description||!form.amount){showToast("請填寫說明與金額","error");return;}showConfirm({title:"確認新增營收",message:`新增「${form.description}」${fmt(form.amount)}到雲端？`,onConfirm:async()=>{await dbAdd("revenue",{...form,id:Date.now(),amount:parseFloat(form.amount),createdAt:new Date().toISOString()});setForm({date:today(),description:"",amount:"",note:""});setAiStatus(null);showToast("✅ 已新增！");setMode("list");}});};
   const grouped={};revenue.forEach(r=>{const d=r.date||"unknown";if(!grouped[d])grouped[d]=[];grouped[d].push(r);});
   const dates=Object.keys(grouped).sort((a,b)=>b.localeCompare(a));
   const todayTotal=(grouped[today()]||[]).reduce((s,r)=>s+(Number(r.amount)||0),0);
+
+  // 年月統計
+  const years=[...new Set(revenue.map(r=>r.date?.slice(0,4)).filter(Boolean))].sort((a,b)=>b.localeCompare(a));
+  const yearTotal=revenue.filter(r=>r.date?.slice(0,4)===String(statYear)).reduce((s,r)=>s+(Number(r.amount)||0),0);
+  const monthsData=[];
+  for(let m=1;m<=12;m++){
+    const mk=`${statYear}-${String(m).padStart(2,"0")}`;
+    const total=revenue.filter(r=>r.date?.slice(0,7)===mk).reduce((s,r)=>s+(Number(r.amount)||0),0);
+    monthsData.push({month:m,mk,total});
+  }
+  const maxMonth=Math.max(...monthsData.map(m=>m.total),1);
+
   return(
     <div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
         <Card style={{background:"#E7F5ED",borderColor:"#3A7D5A22"}}><div style={{fontSize:10,color:T.textLight,marginBottom:2}}>本月總營收</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:17,fontWeight:700,color:"#3A7D5A"}}>{fmt(monthRevenue)}</div></Card>
         <Card style={{background:"#F0FFF4",borderColor:"#4A7C5922"}}><div style={{fontSize:10,color:T.textLight,marginBottom:2}}>今日營收</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:17,fontWeight:700,color:"#4A7C59"}}>{fmt(todayTotal)}</div></Card>
       </div>
-      <div style={{display:"flex",gap:8,marginBottom:14}}>{["list","add"].map(v=><button key={v} onClick={()=>{setMode(v);setAiStatus(null);}} style={{flex:1,padding:"9px 0",borderRadius:10,border:`2px solid ${v==="add"?"#3A7D5A":T.border}`,background:mode===v?(v==="add"?"#3A7D5A":"#E7F5ED"):T.card,color:mode===v?(v==="add"?"#FFF":"#3A7D5A"):T.textLight,fontWeight:700,fontSize:13,cursor:"pointer"}}>{v==="add"?"➕ 新增營收":"📋 營收明細"}</button>)}</div>
+      <div style={{display:"flex",gap:8,marginBottom:14}}>{[["list","📋 明細"],["stats","📊 年月統計"],["add","➕ 新增"]].map(([v,lbl])=><button key={v} onClick={()=>{setMode(v);setAiStatus(null);}} style={{flex:1,padding:"9px 0",borderRadius:10,border:`2px solid ${v==="add"?"#3A7D5A":T.border}`,background:mode===v?(v==="add"?"#3A7D5A":"#E7F5ED"):T.card,color:mode===v?(v==="add"?"#FFF":"#3A7D5A"):T.textLight,fontWeight:700,fontSize:12,cursor:"pointer"}}>{lbl}</button>)}</div>
+
+      {mode==="stats"&&(
+        <div>
+          {/* 年份選擇 */}
+          <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+            {years.length===0?<div style={{color:T.textLight,fontSize:12,padding:"8px 0"}}>尚無資料</div>:years.map(y=>(
+              <button key={y} onClick={()=>setStatYear(Number(y))} style={{padding:"7px 16px",borderRadius:20,border:`1.5px solid ${String(statYear)===y?"#3A7D5A":T.border}`,background:String(statYear)===y?"#3A7D5A":T.card,color:String(statYear)===y?"#FFF":T.textMid,fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"'DM Mono',monospace"}}>{y}年</button>
+            ))}
+          </div>
+          {/* 年度總計 */}
+          <Card style={{marginBottom:14,background:"linear-gradient(135deg,#2E6348,#3A7D5A)",borderColor:"#3A7D5A"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div><div style={{fontSize:11,color:"#BBF7D0",marginBottom:3}}>{statYear} 年度總營收</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:26,fontWeight:700,color:"#FFF"}}>{fmt(yearTotal)}</div></div>
+              <div style={{fontSize:36,opacity:0.5}}>📈</div>
+            </div>
+          </Card>
+          {/* 各月統計 */}
+          <Card>
+            <div style={{fontSize:13,fontWeight:700,color:"#3A7D5A",borderLeft:"3px solid #3A7D5A",paddingLeft:10,marginBottom:14}}>各月營收明細</div>
+            {monthsData.map(m=>(
+              <div key={m.month} style={{marginBottom:10}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                  <span style={{fontSize:13,fontWeight:600,color:m.total>0?T.text:T.textLight}}>{m.month} 月</span>
+                  <span style={{fontFamily:"'DM Mono',monospace",fontSize:14,fontWeight:700,color:m.total>0?"#3A7D5A":T.textLight}}>{fmt(m.total)}</span>
+                </div>
+                <div style={{height:6,background:"#EDE5D8",borderRadius:3,overflow:"hidden"}}>
+                  <div style={{height:"100%",width:`${(m.total/maxMonth)*100}%`,background:"linear-gradient(90deg,#4A7C59,#3A7D5A)",borderRadius:3,transition:"width 0.3s"}}/>
+                </div>
+              </div>
+            ))}
+          </Card>
+        </div>
+      )}
+
       {mode==="add"&&(
         <Card style={{marginBottom:16,borderColor:"#3A7D5A33"}}>
           <div style={{fontSize:13,fontWeight:700,color:"#3A7D5A",marginBottom:12}}>新增每日營收</div>
@@ -837,6 +978,474 @@ function RevenuePage({revenue,dbAdd,dbDel,showToast,showConfirm,monthRevenue,api
           </div>
         );})
       )}
+    </div>
+  );
+}
+
+/* ════ FUND PAGE ════ */
+function FundPage({fundBuy,fundSell,fundDiv,dbAdd,dbDel,showToast,showConfirm}){
+  const [sub,setSub]=useState("overview");
+  const SUBS=[
+    {id:"overview",label:"總覽"},
+    {id:"inventory",label:"基金庫存"},
+    {id:"buy",label:"進場"},
+    {id:"sell",label:"出場"},
+    {id:"div",label:"配息"},
+  ];
+
+  // 計算每支基金的持有狀態（庫存中=已進場未出場）
+  const soldBuyIds = new Set(fundSell.map(s=>s.buyId).filter(Boolean));
+  const heldBuys = fundBuy.filter(b=>!soldBuyIds.has(b.id));
+
+  // 兩人資金池統計
+  const pool = {};
+  FUND_PEOPLE.forEach(p=>{ pool[p.id]={ held:0, recovered:0, dividend:0 }; });
+  // 庫存中金額（持有未賣）
+  heldBuys.forEach(b=>{
+    FUND_PEOPLE.forEach(p=>{ pool[p.id].held += Number(b[`amount_${p.id}`])||0; });
+  });
+  // 已回收金額（賣出的回收金額，照進場比例分配）
+  fundSell.forEach(s=>{
+    const buy = fundBuy.find(b=>b.id===s.buyId);
+    const recovered = Number(s.recovered)||0;
+    if(buy){
+      const totalBuy = FUND_PEOPLE.reduce((sum,p)=>sum+(Number(buy[`amount_${p.id}`])||0),0);
+      FUND_PEOPLE.forEach(p=>{
+        const ratio = totalBuy>0 ? (Number(buy[`amount_${p.id}`])||0)/totalBuy : 0;
+        pool[p.id].recovered += recovered*ratio;
+      });
+    } else {
+      // 沒對應進場，平均或記在備註
+      FUND_PEOPLE.forEach(p=>{ pool[p.id].recovered += recovered/FUND_PEOPLE.length; });
+    }
+  });
+  // 配息收入
+  fundDiv.forEach(d=>{
+    if(d.person && pool[d.person]) pool[d.person].dividend += Number(d.amount)||0;
+  });
+
+  return(
+    <div>
+      {/* 子分頁 */}
+      <div style={{display:"flex",gap:5,marginBottom:16,overflowX:"auto",paddingBottom:2}}>
+        {SUBS.map(s=>(
+          <button key={s.id} onClick={()=>setSub(s.id)} style={{flexShrink:0,padding:"8px 14px",borderRadius:10,border:`1.5px solid ${sub===s.id?"#C8A24A":T.border}`,background:sub===s.id?"linear-gradient(135deg,#C8A24A,#A8842E)":T.card,color:sub===s.id?"#FFF":T.textMid,fontWeight:700,fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}}>
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {sub==="overview"  && <FundOverview pool={pool} heldBuys={heldBuys} fundBuy={fundBuy} fundSell={fundSell} fundDiv={fundDiv}/>}
+      {sub==="inventory" && <FundInventory heldBuys={heldBuys}/>}
+      {sub==="buy"       && <FundBuyForm fundBuy={fundBuy} dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm} soldBuyIds={soldBuyIds}/>}
+      {sub==="sell"      && <FundSellForm fundBuy={fundBuy} fundSell={fundSell} heldBuys={heldBuys} dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm}/>}
+      {sub==="div"       && <FundDivForm fundBuy={fundBuy} fundDiv={fundDiv} dbAdd={dbAdd} dbDel={dbDel} showToast={showToast} showConfirm={showConfirm}/>}
+    </div>
+  );
+}
+
+/* 基金總覽 */
+function FundOverview({pool,heldBuys,fundBuy,fundSell,fundDiv}){
+  // 持有中基金依名稱加總
+  const byName={};
+  heldBuys.forEach(b=>{
+    const nm=b.name||"未命名";
+    if(!byName[nm])byName[nm]={name:nm,total:0,eason:0,mimi:0};
+    byName[nm].total += FUND_PEOPLE.reduce((s,p)=>s+(Number(b[`amount_${p.id}`])||0),0);
+    byName[nm].eason += Number(b.amount_eason)||0;
+    byName[nm].mimi  += Number(b.amount_mimi)||0;
+  });
+  const funds=Object.values(byName).sort((a,b)=>b.total-a.total);
+  const grandTotal=funds.reduce((s,f)=>s+f.total,0);
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      {/* 兩人資金總表 */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        {FUND_PEOPLE.map(p=>{
+          const d=pool[p.id];
+          const totalAsset=d.held+d.recovered+d.dividend;
+          return(
+            <div key={p.id} style={{background:`linear-gradient(160deg,${p.bg},#FFFFFF)`,border:`1.5px solid ${p.color}44`,borderRadius:18,padding:"16px 15px",boxShadow:"0 4px 16px rgba(0,0,0,0.06)"}}>
+              <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:14}}>
+                <div style={{width:32,height:32,borderRadius:"50%",background:p.color,display:"flex",alignItems:"center",justifyContent:"center",color:"#FFF",fontWeight:700,fontSize:14,fontFamily:"'Noto Serif TC',serif"}}>{p.name[0]}</div>
+                <div style={{fontSize:14,fontWeight:700,color:p.color,fontFamily:"'Noto Serif TC',serif"}}>{p.name}</div>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:9}}>
+                <div><div style={{fontSize:10,color:T.textLight}}>庫存中（進場中）</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:16,fontWeight:700,color:T.text}}>{fmt(d.held)}</div></div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  <div><div style={{fontSize:10,color:T.textLight}}>已回收</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:13,fontWeight:700,color:"#3A7D5A"}}>{fmt(d.recovered)}</div></div>
+                  <div><div style={{fontSize:10,color:T.textLight}}>配息收入</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:13,fontWeight:700,color:p.color}}>{fmt(d.dividend)}</div></div>
+                </div>
+                <div style={{borderTop:`1px solid ${p.color}33`,paddingTop:8,marginTop:2}}>
+                  <div style={{fontSize:10,color:T.textLight}}>總資產</div>
+                  <div style={{fontFamily:"'DM Mono',monospace",fontSize:18,fontWeight:700,color:p.color}}>{fmt(totalAsset)}</div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* 持有中基金清單與佔比 */}
+      <Card>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#A8842E",borderLeft:"3px solid #C8A24A",paddingLeft:10}}>持有中基金（{funds.length} 支）</div>
+          <div style={{fontFamily:"'DM Mono',monospace",fontSize:13,fontWeight:700,color:"#A8842E"}}>{fmt(grandTotal)}</div>
+        </div>
+        {funds.length===0?<div style={{color:T.textLight,fontSize:12,textAlign:"center",padding:"20px 0"}}>尚無持有中基金</div>
+          :funds.map(f=>{
+            const pct=grandTotal>0?(f.total/grandTotal*100):0;
+            return(
+              <div key={f.name} style={{marginBottom:14}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:5}}>
+                  <span style={{fontSize:13,fontWeight:700,color:T.text}}>{f.name}</span>
+                  <div style={{textAlign:"right"}}>
+                    <span style={{fontFamily:"'DM Mono',monospace",fontSize:14,fontWeight:700,color:T.text}}>{fmt(f.total)}</span>
+                    <span style={{fontSize:11,color:T.textLight,marginLeft:6}}>{pct.toFixed(1)}%</span>
+                  </div>
+                </div>
+                {/* 佔比條 - 兩人顏色 */}
+                <div style={{height:8,background:"#EDE5D8",borderRadius:4,overflow:"hidden",display:"flex"}}>
+                  <div style={{height:"100%",width:`${f.total>0?f.eason/f.total*100:0}%`,background:FUND_PEOPLE[0].color}}/>
+                  <div style={{height:"100%",width:`${f.total>0?f.mimi/f.total*100:0}%`,background:FUND_PEOPLE[1].color}}/>
+                </div>
+                <div style={{display:"flex",gap:12,marginTop:4}}>
+                  {f.eason>0&&<span style={{fontSize:10,color:FUND_PEOPLE[0].color,fontWeight:700}}>● 伊森胡 {fmt(f.eason)}</span>}
+                  {f.mimi>0&&<span style={{fontSize:10,color:FUND_PEOPLE[1].color,fontWeight:700}}>● 咪咪 {fmt(f.mimi)}</span>}
+                </div>
+              </div>
+            );
+          })
+        }
+      </Card>
+    </div>
+  );
+}
+
+/* 基金庫存表 */
+function FundInventory({heldBuys}){
+  const byName={};
+  heldBuys.forEach(b=>{
+    const nm=b.name||"未命名";
+    if(!byName[nm])byName[nm]={name:nm,entries:[],total:0,eason:0,mimi:0};
+    byName[nm].entries.push(b);
+    byName[nm].total += FUND_PEOPLE.reduce((s,p)=>s+(Number(b[`amount_${p.id}`])||0),0);
+    byName[nm].eason += Number(b.amount_eason)||0;
+    byName[nm].mimi  += Number(b.amount_mimi)||0;
+  });
+  const funds=Object.values(byName).sort((a,b)=>b.total-a.total);
+
+  return(
+    <div>
+      <div style={{fontSize:13,fontWeight:700,color:"#A8842E",marginBottom:14}}>📦 基金庫存表（持有中）</div>
+      {funds.length===0?<div style={{textAlign:"center",color:T.textLight,padding:"40px 0",fontSize:13}}>尚無持有中基金</div>
+        :funds.map(f=>(
+          <Card key={f.name} style={{marginBottom:12,borderColor:"#C8A24A33"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <div style={{fontSize:15,fontWeight:700,color:T.text,fontFamily:"'Noto Serif TC',serif"}}>{f.name}</div>
+              <Badge label="庫存中" color="#3A7D5A" bg="#E7F5ED"/>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",padding:"10px 12px",background:"linear-gradient(135deg,#FBF6E8,#F9F0DC)",borderRadius:10,marginBottom:10}}>
+              <span style={{fontSize:12,color:T.textMid,fontWeight:600}}>總投入金額</span>
+              <span style={{fontFamily:"'DM Mono',monospace",fontSize:16,fontWeight:700,color:"#A8842E"}}>{fmt(f.total)}</span>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+              {FUND_PEOPLE.map((p,i)=>{
+                const amt=i===0?f.eason:f.mimi;
+                return(
+                  <div key={p.id} style={{padding:"9px 11px",background:p.bg,borderRadius:9,border:`1px solid ${p.color}33`}}>
+                    <div style={{fontSize:10,color:p.color,fontWeight:700,marginBottom:2}}>{p.name}</div>
+                    <div style={{fontFamily:"'DM Mono',monospace",fontSize:14,fontWeight:700,color:T.text}}>{fmt(amt)}</div>
+                  </div>
+                );
+              })}
+            </div>
+            {/* 進場明細 */}
+            <div style={{borderTop:`1px solid ${T.border}`,paddingTop:8}}>
+              {f.entries.map(e=>(
+                <div key={e.id} style={{fontSize:11,color:T.textLight,display:"flex",justifyContent:"space-between",padding:"3px 0"}}>
+                  <span>📅 {e.buyDate} · 淨值 {e.nav||"—"}{e.hasDividend?" · 配息":""}</span>
+                  <span style={{fontFamily:"'DM Mono',monospace"}}>{fmt(FUND_PEOPLE.reduce((s,p)=>s+(Number(e[`amount_${p.id}`])||0),0))}</span>
+                </div>
+              ))}
+            </div>
+          </Card>
+        ))
+      }
+    </div>
+  );
+}
+
+/* 進場表單 */
+function FundBuyForm({fundBuy,dbAdd,dbDel,showToast,showConfirm,soldBuyIds}){
+  const [mode,setMode]=useState("list");
+  const [form,setForm]=useState({name:"",buyDate:today(),nav:"",hasDividend:false,amount_eason:"",amount_mimi:"",note:""});
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const COLOR="#C8A24A";
+  const totalAmt=(parseFloat(form.amount_eason)||0)+(parseFloat(form.amount_mimi)||0);
+
+  const confirmAdd=()=>{
+    if(!form.name||totalAmt<=0){showToast("請填寫基金名稱與至少一人的進場金額","error");return;}
+    showConfirm({title:"確認進場紀錄",message:`新增「${form.name}」進場 ${fmt(totalAmt)}？`,onConfirm:async()=>{
+      await dbAdd("fund_buy",{...form,id:Date.now(),nav:parseFloat(form.nav)||0,amount_eason:parseFloat(form.amount_eason)||0,amount_mimi:parseFloat(form.amount_mimi)||0,createdAt:new Date().toISOString()});
+      setForm({name:"",buyDate:today(),nav:"",hasDividend:false,amount_eason:"",amount_mimi:"",note:""});
+      showToast("✅ 進場紀錄已新增！");setMode("list");
+    }});
+  };
+
+  const sorted=[...fundBuy].sort((a,b)=>(b.buyDate||"").localeCompare(a.buyDate||""));
+
+  return(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div style={{fontWeight:700,fontSize:14,color:COLOR}}>📥 進場紀錄（{fundBuy.length}）</div>
+        <button onClick={()=>setMode(mode==="add"?"list":"add")} style={{padding:"7px 14px",borderRadius:10,border:`1.5px solid ${COLOR}`,background:mode==="add"?COLOR:"transparent",color:mode==="add"?"#FFF":COLOR,fontSize:12,fontWeight:700,cursor:"pointer"}}>{mode==="add"?"✕ 取消":"＋ 新增"}</button>
+      </div>
+
+      {mode==="add"&&(
+        <Card style={{marginBottom:16,borderColor:`${COLOR}44`}}>
+          <div style={{fontSize:13,fontWeight:700,color:COLOR,marginBottom:14}}>新增基金進場</div>
+          <div style={{display:"flex",flexDirection:"column",gap:11}}>
+            <Field label="基金名稱 *" value={form.name} onChange={v=>set("name",v)} placeholder="例：野村中小型股"/>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              <Field label="進場日期 *" type="date" value={form.buyDate} onChange={v=>set("buyDate",v)}/>
+              <Field label="進場淨值 NAV" value={form.nav} onChange={v=>set("nav",v)} placeholder="0" mono/>
+            </div>
+            <div>
+              <Lbl c="是否配息"/>
+              <div style={{display:"flex",gap:8,marginTop:5}}>
+                {[["有配息",true],["不配息",false]].map(([lbl,val])=>(
+                  <button key={lbl} onClick={()=>set("hasDividend",val)} style={{flex:1,padding:"9px 0",borderRadius:9,border:`1.5px solid ${form.hasDividend===val?COLOR:T.border}`,background:form.hasDividend===val?`${COLOR}18`:"#FAF7F2",color:form.hasDividend===val?"#A8842E":T.textMid,fontWeight:700,fontSize:12,cursor:"pointer"}}>{lbl}</button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <Lbl c="進場金額 — 屬於誰（可兩人各填）"/>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:6}}>
+                {FUND_PEOPLE.map((p,i)=>(
+                  <div key={p.id} style={{background:p.bg,borderRadius:10,padding:"10px 11px",border:`1px solid ${p.color}33`}}>
+                    <div style={{fontSize:11,color:p.color,fontWeight:700,marginBottom:5}}>{p.name}</div>
+                    <input value={i===0?form.amount_eason:form.amount_mimi} onChange={e=>set(i===0?"amount_eason":"amount_mimi",e.target.value)} placeholder="0" inputMode="numeric"
+                      style={{width:"100%",background:"#FFF",border:`1.5px solid ${p.color}44`,borderRadius:8,padding:"9px 10px",color:T.text,fontSize:14,outline:"none",fontFamily:"'DM Mono',monospace",boxSizing:"border-box"}}/>
+                  </div>
+                ))}
+              </div>
+              {totalAmt>0&&<div style={{textAlign:"right",marginTop:8,fontSize:12,color:T.textMid}}>進場總額：<span style={{fontFamily:"'DM Mono',monospace",fontWeight:700,color:"#A8842E"}}>{fmt(totalAmt)}</span></div>}
+            </div>
+            <Field label="備註" value={form.note} onChange={v=>set("note",v)} placeholder="選填…"/>
+            <PBtn onClick={confirmAdd} full>💾 新增進場紀錄</PBtn>
+          </div>
+        </Card>
+      )}
+
+      {sorted.length===0?<div style={{textAlign:"center",color:T.textLight,padding:"40px 0",fontSize:13}}>尚無進場紀錄</div>
+        :sorted.map(b=>{
+          const total=FUND_PEOPLE.reduce((s,p)=>s+(Number(b[`amount_${p.id}`])||0),0);
+          const isSold=soldBuyIds.has(b.id);
+          return(
+            <div key={b.id} style={{background:T.card,border:`1.5px solid ${isSold?T.border:COLOR+"44"}`,borderRadius:13,padding:"13px 14px",marginBottom:9,boxShadow:T.shadow,opacity:isSold?0.6:1}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                    <span style={{fontSize:14,fontWeight:700}}>{b.name}</span>
+                    {isSold?<Badge label="已出場" color="#999" bg="#F0F0F0"/>:<Badge label="庫存中" color="#3A7D5A" bg="#E7F5ED"/>}
+                    {b.hasDividend&&<Badge label="配息" color="#C8A24A" bg="#FBF6E8"/>}
+                  </div>
+                  <div style={{fontSize:11,color:T.textLight}}>📅 {b.buyDate}{b.nav?` · 淨值 ${b.nav}`:""}</div>
+                </div>
+                <div style={{textAlign:"right"}}><div style={{fontFamily:"'DM Mono',monospace",fontSize:17,fontWeight:700,color:"#A8842E"}}>{fmt(total)}</div></div>
+              </div>
+              <div style={{display:"flex",gap:12,paddingTop:7,borderTop:`1px solid ${T.border}`}}>
+                {FUND_PEOPLE.map((p,i)=>{const amt=Number(b[`amount_${p.id}`])||0;return amt>0?<span key={p.id} style={{fontSize:11,color:p.color,fontWeight:700}}>● {p.name} {fmt(amt)}</span>:null;})}
+              </div>
+              {!isSold&&<button onClick={()=>showConfirm({title:"確認刪除",message:`刪除「${b.name}」進場紀錄？`,triple:true,onConfirm:async()=>{await dbDel("fund_buy",b.id);showToast("已刪除");}})} style={{marginTop:7,fontSize:11,color:"#C0A090",background:"none",border:"none",cursor:"pointer",padding:0}}>🗑️ 刪除</button>}
+            </div>
+          );
+        })
+      }
+    </div>
+  );
+}
+
+/* 出場表單 */
+function FundSellForm({fundBuy,fundSell,heldBuys,dbAdd,dbDel,showToast,showConfirm}){
+  const [mode,setMode]=useState("list");
+  const [form,setForm]=useState({buyId:"",sellDate:today(),sellNav:"",recovered:"",note:""});
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const COLOR="#3A7D5A";
+  const selectedBuy=fundBuy.find(b=>b.id===form.buyId);
+
+  const confirmAdd=()=>{
+    if(!form.buyId||!form.recovered){showToast("請選擇基金並填寫回收金額","error");return;}
+    const buy=fundBuy.find(b=>b.id===form.buyId);
+    showConfirm({title:"確認出場紀錄",message:`「${buy?.name}」賣出，回收 ${fmt(form.recovered)}？\n回收金額將照進場比例分配回兩人總倉庫。`,onConfirm:async()=>{
+      await dbAdd("fund_sell",{...form,id:Date.now(),fundName:buy?.name||"",sellNav:parseFloat(form.sellNav)||0,recovered:parseFloat(form.recovered)||0,createdAt:new Date().toISOString()});
+      setForm({buyId:"",sellDate:today(),sellNav:"",recovered:"",note:""});
+      showToast("✅ 出場紀錄已新增！");setMode("list");
+    }});
+  };
+
+  const sorted=[...fundSell].sort((a,b)=>(b.sellDate||"").localeCompare(a.sellDate||""));
+
+  return(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div style={{fontWeight:700,fontSize:14,color:COLOR}}>📤 出場紀錄（{fundSell.length}）</div>
+        <button onClick={()=>setMode(mode==="add"?"list":"add")} style={{padding:"7px 14px",borderRadius:10,border:`1.5px solid ${COLOR}`,background:mode==="add"?COLOR:"transparent",color:mode==="add"?"#FFF":COLOR,fontSize:12,fontWeight:700,cursor:"pointer"}}>{mode==="add"?"✕ 取消":"＋ 新增"}</button>
+      </div>
+
+      {mode==="add"&&(
+        <Card style={{marginBottom:16,borderColor:`${COLOR}44`}}>
+          <div style={{fontSize:13,fontWeight:700,color:COLOR,marginBottom:14}}>新增基金出場</div>
+          <div style={{display:"flex",flexDirection:"column",gap:11}}>
+            <div>
+              <Lbl c="選擇要出場的基金（持有中）"/>
+              {heldBuys.length===0?<div style={{fontSize:12,color:T.textLight,padding:"10px 0"}}>目前沒有持有中的基金</div>
+                :<div style={{display:"flex",flexDirection:"column",gap:6,marginTop:6}}>
+                  {heldBuys.map(b=>{
+                    const total=FUND_PEOPLE.reduce((s,p)=>s+(Number(b[`amount_${p.id}`])||0),0);
+                    return(
+                      <button key={b.id} onClick={()=>set("buyId",b.id)} style={{textAlign:"left",padding:"10px 12px",borderRadius:9,border:`1.5px solid ${form.buyId===b.id?COLOR:T.border}`,background:form.buyId===b.id?"#E7F5ED":"#FAF7F2",cursor:"pointer"}}>
+                        <div style={{display:"flex",justifyContent:"space-between"}}>
+                          <span style={{fontSize:13,fontWeight:700,color:form.buyId===b.id?COLOR:T.text}}>{b.name}</span>
+                          <span style={{fontFamily:"'DM Mono',monospace",fontSize:12,fontWeight:700,color:T.textMid}}>{fmt(total)}</span>
+                        </div>
+                        <div style={{fontSize:10,color:T.textLight,marginTop:2}}>📅 進場 {b.buyDate}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              }
+            </div>
+            {selectedBuy&&(
+              <>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  <Field label="賣出日期 *" type="date" value={form.sellDate} onChange={v=>set("sellDate",v)}/>
+                  <Field label="賣出淨值" value={form.sellNav} onChange={v=>set("sellNav",v)} placeholder="0" mono/>
+                </div>
+                <Field label="回收金額 NT$ *（實際拿回的錢）" value={form.recovered} onChange={v=>set("recovered",v)} placeholder="0" mono/>
+                {/* 分配預覽 */}
+                {form.recovered&&(()=>{
+                  const totalBuy=FUND_PEOPLE.reduce((s,p)=>s+(Number(selectedBuy[`amount_${p.id}`])||0),0);
+                  return(
+                    <div style={{background:"#F0FFF4",borderRadius:10,padding:"10px 12px",border:"1px solid #C8E6C9"}}>
+                      <div style={{fontSize:11,color:"#2E7D32",fontWeight:700,marginBottom:6}}>照進場比例分配回收金額</div>
+                      {FUND_PEOPLE.map(p=>{
+                        const ratio=totalBuy>0?(Number(selectedBuy[`amount_${p.id}`])||0)/totalBuy:0;
+                        const back=(parseFloat(form.recovered)||0)*ratio;
+                        return ratio>0?<div key={p.id} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"2px 0"}}><span style={{color:p.color,fontWeight:700}}>{p.name}（{(ratio*100).toFixed(0)}%）</span><span style={{fontFamily:"'DM Mono',monospace",fontWeight:700}}>{fmt(back)}</span></div>:null;
+                      })}
+                    </div>
+                  );
+                })()}
+                <Field label="備註" value={form.note} onChange={v=>set("note",v)} placeholder="選填…"/>
+                <PBtn onClick={confirmAdd} full green>💾 新增出場紀錄</PBtn>
+              </>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {sorted.length===0?<div style={{textAlign:"center",color:T.textLight,padding:"40px 0",fontSize:13}}>尚無出場紀錄</div>
+        :sorted.map(s=>(
+          <div key={s.id} style={{background:T.card,border:`1.5px solid ${T.cardBorder}`,borderRadius:13,padding:"13px 14px",marginBottom:9,boxShadow:T.shadow}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+              <div>
+                <div style={{fontSize:14,fontWeight:700,marginBottom:3}}>{s.fundName}</div>
+                <div style={{fontSize:11,color:T.textLight}}>📅 賣出 {s.sellDate}{s.sellNav?` · 淨值 ${s.sellNav}`:""}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:10,color:T.textLight}}>回收金額</div>
+                <div style={{fontFamily:"'DM Mono',monospace",fontSize:17,fontWeight:700,color:"#3A7D5A"}}>{fmt(s.recovered)}</div>
+              </div>
+            </div>
+            {s.note&&<div style={{fontSize:11,color:T.textLight,marginTop:6}}>{s.note}</div>}
+            <button onClick={()=>showConfirm({title:"確認刪除",message:`刪除「${s.fundName}」出場紀錄？\n刪除後該基金會回到庫存中。`,triple:true,onConfirm:async()=>{await dbDel("fund_sell",s.id);showToast("已刪除");}})} style={{marginTop:7,fontSize:11,color:"#C0A090",background:"none",border:"none",cursor:"pointer",padding:0}}>🗑️ 刪除</button>
+          </div>
+        ))
+      }
+    </div>
+  );
+}
+
+/* 配息表單 */
+function FundDivForm({fundBuy,fundDiv,dbAdd,dbDel,showToast,showConfirm}){
+  const [mode,setMode]=useState("list");
+  const [form,setForm]=useState({fundName:"",divDate:today(),amount:"",person:"eason",note:""});
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const COLOR="#C8A24A";
+  // 配息基金名稱建議（有配息的基金）
+  const divFundNames=[...new Set(fundBuy.filter(b=>b.hasDividend).map(b=>b.name))];
+
+  const confirmAdd=()=>{
+    if(!form.fundName||!form.amount){showToast("請填寫基金名稱與配息金額","error");return;}
+    const pname=FUND_PEOPLE.find(p=>p.id===form.person)?.name;
+    showConfirm({title:"確認配息紀錄",message:`「${form.fundName}」配息 ${fmt(form.amount)} 給 ${pname}？`,onConfirm:async()=>{
+      await dbAdd("fund_div",{...form,id:Date.now(),amount:parseFloat(form.amount)||0,createdAt:new Date().toISOString()});
+      setForm({fundName:"",divDate:today(),amount:"",person:"eason",note:""});
+      showToast("✅ 配息紀錄已新增！");setMode("list");
+    }});
+  };
+
+  const sorted=[...fundDiv].sort((a,b)=>(b.divDate||"").localeCompare(a.divDate||""));
+
+  return(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div style={{fontWeight:700,fontSize:14,color:COLOR}}>💰 配息紀錄（{fundDiv.length}）</div>
+        <button onClick={()=>setMode(mode==="add"?"list":"add")} style={{padding:"7px 14px",borderRadius:10,border:`1.5px solid ${COLOR}`,background:mode==="add"?COLOR:"transparent",color:mode==="add"?"#FFF":COLOR,fontSize:12,fontWeight:700,cursor:"pointer"}}>{mode==="add"?"✕ 取消":"＋ 新增"}</button>
+      </div>
+
+      {mode==="add"&&(
+        <Card style={{marginBottom:16,borderColor:`${COLOR}44`}}>
+          <div style={{fontSize:13,fontWeight:700,color:COLOR,marginBottom:14}}>新增配息入帳</div>
+          <div style={{display:"flex",flexDirection:"column",gap:11}}>
+            <Field label="基金名稱 *" value={form.fundName} onChange={v=>set("fundName",v)} placeholder="例：群益印度中小"/>
+            {divFundNames.length>0&&(
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:-4}}>
+                {divFundNames.map(nm=><button key={nm} onClick={()=>set("fundName",nm)} style={{padding:"4px 10px",borderRadius:14,border:`1px solid ${COLOR}44`,background:"#FBF6E8",color:"#A8842E",fontSize:11,fontWeight:600,cursor:"pointer"}}>{nm}</button>)}
+              </div>
+            )}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              <Field label="配息入帳日 *" type="date" value={form.divDate} onChange={v=>set("divDate",v)}/>
+              <Field label="配息金額 NT$ *" value={form.amount} onChange={v=>set("amount",v)} placeholder="0" mono/>
+            </div>
+            <div>
+              <Lbl c="配息屬於誰"/>
+              <div style={{display:"flex",gap:8,marginTop:6}}>
+                {FUND_PEOPLE.map(p=>(
+                  <button key={p.id} onClick={()=>set("person",p.id)} style={{flex:1,padding:"11px 0",borderRadius:9,border:`1.5px solid ${form.person===p.id?p.color:T.border}`,background:form.person===p.id?p.bg:"#FAF7F2",color:form.person===p.id?p.color:T.textMid,fontWeight:700,fontSize:13,cursor:"pointer"}}>{p.name}</button>
+                ))}
+              </div>
+            </div>
+            <Field label="備註" value={form.note} onChange={v=>set("note",v)} placeholder="選填…"/>
+            <PBtn onClick={confirmAdd} full>💾 新增配息紀錄</PBtn>
+          </div>
+        </Card>
+      )}
+
+      {sorted.length===0?<div style={{textAlign:"center",color:T.textLight,padding:"40px 0",fontSize:13}}>尚無配息紀錄</div>
+        :sorted.map(d=>{
+          const p=FUND_PEOPLE.find(x=>x.id===d.person)||FUND_PEOPLE[0];
+          return(
+            <div key={d.id} style={{background:T.card,border:`1.5px solid ${T.cardBorder}`,borderRadius:13,padding:"13px 14px",marginBottom:9,boxShadow:T.shadow}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                    <span style={{fontSize:14,fontWeight:700}}>{d.fundName}</span>
+                    <Badge label={p.name} color={p.color} bg={p.bg}/>
+                  </div>
+                  <div style={{fontSize:11,color:T.textLight}}>📅 入帳 {d.divDate}</div>
+                </div>
+                <div style={{fontFamily:"'DM Mono',monospace",fontSize:17,fontWeight:700,color:COLOR}}>{fmt(d.amount)}</div>
+              </div>
+              {d.note&&<div style={{fontSize:11,color:T.textLight,marginTop:6}}>{d.note}</div>}
+              <button onClick={()=>showConfirm({title:"確認刪除",message:`刪除此筆配息紀錄？`,triple:true,onConfirm:async()=>{await dbDel("fund_div",d.id);showToast("已刪除");}})} style={{marginTop:7,fontSize:11,color:"#C0A090",background:"none",border:"none",cursor:"pointer",padding:0}}>🗑️ 刪除</button>
+            </div>
+          );
+        })
+      }
     </div>
   );
 }
@@ -959,7 +1568,7 @@ const root=ReactDOM.createRoot(document.getElementById("root"));
 root.render(<App/>);
 </script>
 <script>
-// v5.4 - 純網頁模式，無 Service Worker
+// v6.0 - 純網頁模式，無 Service Worker
 </script>
 </body>
 </html>
